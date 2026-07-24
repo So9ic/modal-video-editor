@@ -15,7 +15,10 @@ import modal
 # -----------------------------------------------------------------------------
 # 1. MODAL IMAGE & APP DEFINITION (EXACT COPIED PIPELINE FROM televideditor.py)
 # -----------------------------------------------------------------------------
-image = (
+auth_file_path = os.path.expanduser("~/.codex/auth.json")
+font_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Montserrat-ExtraBold.ttf")
+
+image_builder = (
     modal.Image.debian_slim()
     .apt_install("ffmpeg", "fonts-freefont-ttf", "curl")
     .run_commands(
@@ -24,19 +27,16 @@ image = (
     )
     .pip_install("requests", "pillow", "openai", "fastapi[standard]")
     .run_commands("npm install -g openai-oauth@latest")
-    .add_local_file(
-        os.path.expanduser("~/.codex/auth.json"),
-        remote_path="/root/.codex/auth.json"
-    )
-    .add_local_file(
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "Montserrat-ExtraBold.ttf"),
-        remote_path="/root/Montserrat-ExtraBold.ttf"
-    )
-    .add_local_file(
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "Montserrat-ExtraBold.ttf"),
-        remote_path="/Montserrat-ExtraBold.ttf"
-    )
 )
+
+if os.path.exists(auth_file_path):
+    image_builder = image_builder.add_local_file(auth_file_path, remote_path="/root/.codex/auth.json")
+
+if os.path.exists(font_file_path):
+    image_builder = image_builder.add_local_file(font_file_path, remote_path="/root/Montserrat-ExtraBold.ttf")
+    image_builder = image_builder.add_local_file(font_file_path, remote_path="/Montserrat-ExtraBold.ttf")
+
+image = image_builder
 
 app = modal.App("televideditor-modal", image=image)
 
@@ -454,7 +454,8 @@ def process_video_job_async(chat_id: int, job_data: dict):
 
         # Step 3: EXACT Position & Layer Math (BLIND COPY FROM televideditor.py)
         scale_ratio = COMP_WIDTH / media_w
-        scaled_media_h = int(media_h * scale_ratio)
+        scaled_media_h = (int(media_h * scale_ratio) // 2) * 2
+        fade_canvas_h = scaled_media_h + 2
         media_y_pos = (COMP_HEIGHT / 2 - scaled_media_h / 2) + MEDIA_Y_OFFSET
         caption_y_pos = media_y_pos - caption_height + 1
 
@@ -469,7 +470,7 @@ def process_video_job_async(chat_id: int, job_data: dict):
 
         if apply_fade:
             filter_parts.extend([
-                f"color=c=black:s={COMP_WIDTH}x{scaled_media_h+1}:d={final_duration},format=rgba,fade=t=out:st=0:d={min(FADE_IN_DURATION, final_duration)}[fade_layer]",
+                f"color=c=black:s={COMP_WIDTH}x{fade_canvas_h}:d={final_duration},format=rgba,fade=t=out:st=0:d={min(FADE_IN_DURATION, final_duration)}[fade_layer]",
                 f"[scaled_media][fade_layer]overlay=0:0[media_with_fade]"
             ])
             media_layer = "[media_with_fade]"
@@ -609,6 +610,12 @@ def telegram_webhook(payload: dict):
     chat_id = message["chat"]["id"]
     chat_key = str(chat_id)
 
+    # Access Control: Only respond to authorized chat ID 6371392863
+    ALLOWED_CHAT_ID = 6371392863
+    if str(chat_id) != str(ALLOWED_CHAT_ID):
+        print(f"[Access Control] Ignored update from unauthorized chat_id: {chat_id}")
+        return {"status": "ignored"}
+
     # Answer callback query if present
     if callback_query:
         requests.post(
@@ -630,6 +637,16 @@ def telegram_webhook(payload: dict):
     msg = payload.get("message", {})
     if msg.get("message_id"):
         track_msg(msg)
+
+    # Handle /cancel or /reset command
+    text_content = msg.get("text", "").strip()
+    if text_content in ["/cancel", "/reset"]:
+        user_states.pop(chat_key, None)
+        requests.post(
+            f"https://api.telegram.org/bot{bot_token}/sendMessage",
+            json={"chat_id": chat_id, "text": "❌ Session cancelled. Send an image or video to start a new job."}
+        )
+        return {"status": "ok"}
 
     # Handle /start command
     if msg.get("text") == "/start":
