@@ -706,12 +706,26 @@ def telegram_webhook(payload: dict):
             user_state["apply_fade"] = (cb_data == "fade_yes")
             user_state["state"] = "awaiting_extra_details"
 
+            # Edit the fade question message to show user's choice
+            cb_msg_id = callback_query.get("message", {}).get("message_id")
+            fade_text = "Yes" if cb_data == "fade_yes" else "No"
+            if cb_msg_id:
+                requests.post(
+                    f"https://api.telegram.org/bot{bot_token}/editMessageText",
+                    json={
+                        "chat_id": chat_id,
+                        "message_id": cb_msg_id,
+                        "text": f"✅ Apply fade: *{fade_text}*",
+                        "parse_mode": "Markdown"
+                    }
+                )
+
             # Prompt user for optional extra video details
             res = requests.post(
                 f"https://api.telegram.org/bot{bot_token}/sendMessage",
                 json={
                     "chat_id": chat_id,
-                    "text": "📝 *Optional:* Send any extra details or context about the video (e.g. background info, explanation, or specific technical notes).\n\nType your details below, or send *'skip'* or *'no'* to skip.",
+                    "text": "📝 Any extra context for this video?",
                     "parse_mode": "Markdown"
                 }
             ).json()
