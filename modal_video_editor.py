@@ -84,13 +84,15 @@ def cleanup_files(file_list):
 
 def download_telegram_file(file_id: str, job_id: str, bot_token: str, media_type: str = "video") -> str:
     ensure_directories()
+    chunk_size = 1024 * 1024  # 1MB buffer for ultra-fast downloads
+
     if file_id.startswith("http://") or file_id.startswith("https://"):
         ext = ".mp4" if media_type == "video" else ".jpg"
         save_path = os.path.join(DOWNLOAD_PATH, f"{job_id}{ext}")
         with requests.get(file_id, stream=True, timeout=30) as r:
             r.raise_for_status()
             with open(save_path, "wb") as f:
-                for chunk in r.iter_content(8192):
+                for chunk in r.iter_content(chunk_size):
                     f.write(chunk)
         return save_path
 
@@ -106,7 +108,7 @@ def download_telegram_file(file_id: str, job_id: str, bot_token: str, media_type
     with requests.get(download_url, stream=True, timeout=30) as r:
         r.raise_for_status()
         with open(save_path, "wb") as f:
-            for chunk in r.iter_content(8192):
+            for chunk in r.iter_content(chunk_size):
                 f.write(chunk)
 
     return save_path
@@ -207,21 +209,27 @@ def delete_chat_messages(bot_token: str, chat_id: int, msg_ids: list[int]):
 # -----------------------------------------------------------------------------
 def extract_6_frames_grid(video_path: str, duration: float, job_id: str) -> tuple[str, list[str]]:
     """
-    Extracts 6 evenly-spaced JPEG frames across the video and stitches them
+    Extracts 6 evenly-spaced JPEG frames in parallel across the video and stitches them
     into a single 2-row x 3-column composite grid image.
     Returns (grid_image_path, temp_files_to_clean).
     """
-    frame_paths = []
+    from concurrent.futures import ThreadPoolExecutor
+
     temp_files = []
-    
-    for i in range(6):
+
+    def extract_single_frame(i: int) -> str:
         fraction = (i + 0.5) / 6.0
         timestamp = max(0.0, duration * fraction)
         f_path = os.path.join(OUTPUT_PATH, f"frame_{job_id}_{i+1}.jpg")
         cmd = ["ffmpeg", "-y", "-ss", f"{timestamp:.2f}", "-i", video_path, "-vframes", "1", "-q:v", "2", f_path]
         subprocess.run(cmd, capture_output=True, check=True)
-        frame_paths.append(f_path)
-        temp_files.append(f_path)
+        return f_path
+
+    # Extract all 6 keyframes concurrently in parallel threads
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        frame_paths = list(executor.map(extract_single_frame, range(6)))
+
+    temp_files.extend(frame_paths)
 
     # Load extracted frames to get dimensions
     frames = [Image.open(fp) for fp in frame_paths]
@@ -416,7 +424,7 @@ def generate_multi_frame_ai_caption(grid_path: str | list[str], bot_token: str, 
 # -----------------------------------------------------------------------------
 # 5. ASYNCHRONOUS HEAVY RENDERING & BOT PIPELINE ON MODAL
 # -----------------------------------------------------------------------------
-@app.function(timeout=600, secrets=[modal.Secret.from_name("telegram-video-bot-secrets")])
+@app.function(timeout=600, cpu=4.0, secrets=[modal.Secret.from_name("telegram-video-bot-secrets")])
 def process_video_job_async(chat_id: int, job_data: dict):
     bot_token = os.environ.get("BOT_TOKEN")
     job_id = job_data["job_id"]
@@ -518,8 +526,9 @@ def process_video_job_async(chat_id: int, job_data: dict):
             '-filter_complex', filter_complex,
             *map_args,
             '-c:v', 'libx264',
-            '-preset', 'superfast',
+            '-preset', 'ultrafast',
             '-tune', 'zerolatency',
+            '-threads', '4',
             '-c:a', 'aac',
             '-b:a', '192k',
             '-r', str(FPS),
