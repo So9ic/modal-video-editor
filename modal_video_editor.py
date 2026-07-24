@@ -224,6 +224,10 @@ def extract_6_frames_grid(video_path: str, duration: float, job_id: str) -> tupl
         timestamp = max(0.0, duration * fraction)
         cmd = ["ffmpeg", "-y", "-ss", f"{timestamp:.2f}", "-i", video_path, "-vframes", "1", "-q:v", "2", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"]
         res = subprocess.run(cmd, capture_output=True, check=True)
+        if not res.stdout:
+            # Fallback to timestamp 0.0 if seeking timestamp produced empty bytes
+            cmd_fb = ["ffmpeg", "-y", "-ss", "0.00", "-i", video_path, "-vframes", "1", "-q:v", "2", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"]
+            res = subprocess.run(cmd_fb, capture_output=True, check=True)
         return Image.open(io.BytesIO(res.stdout))
 
     # Extract all 6 keyframes concurrently directly into PIL Image objects in RAM
@@ -515,16 +519,10 @@ def process_video_job_async(chat_id: int, job_data: dict):
         filter_complex = ";".join(filter_parts)
         map_args = ['-map', '[final_v]']
 
-        # Audio stream optimization: Direct streamcopy for AAC audio, re-encode for other codecs
-        audio_encode_args = []
+        # Audio stream synchronization: Align audio timestamps with video PTS to guarantee 100% Telegram A/V sync stability
         if media_type == 'video' and has_audio:
-            if audio_codec == 'aac':
-                map_args.extend(['-map', '1:a?'])
-                audio_encode_args = ['-c:a', 'copy']
-            else:
-                filter_complex += ";[1:a]asetpts=PTS-STARTPTS[final_a]"
-                map_args.extend(['-map', '[final_a]'])
-                audio_encode_args = ['-c:a', 'aac', '-b:a', '192k']
+            filter_complex += ";[1:a]asetpts=PTS-STARTPTS[final_a]"
+            map_args.extend(['-map', '[final_a]'])
 
         command.extend([
             '-filter_complex', filter_complex,
@@ -535,7 +533,8 @@ def process_video_job_async(chat_id: int, job_data: dict):
             '-preset', 'ultrafast',
             '-threads', '4',
             '-slices', '4',
-            *audio_encode_args,
+            '-c:a', 'aac',
+            '-b:a', '192k',
             '-r', str(FPS),
             '-pix_fmt', 'yuv420p',
             '-movflags', '+faststart',
