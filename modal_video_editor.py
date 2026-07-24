@@ -113,45 +113,44 @@ def download_telegram_file(file_id: str, job_id: str, bot_token: str, media_type
 
     return save_path
 
-def get_media_dimensions(media_path, media_type):
+def get_media_info(media_path, media_type):
+    """Single-pass probe for width, height, duration, and audio presence."""
     if media_type == 'image':
         with Image.open(media_path) as img:
-            return img.width, img.height, IMAGE_DURATION
-    else: # video
-        command = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height,duration', '-of', 'json', media_path]
-        try:
-            result = subprocess.run(command, capture_output=True, text=True, check=True, timeout=30)
-            data = json.loads(result.stdout)['streams'][0]
-            width = data['width']
-            height = data['height']
-            duration = data.get('duration')
+            return img.width, img.height, IMAGE_DURATION, False
 
-            # Fallback: query format-level duration if stream duration is missing
-            if duration is None:
-                fmt_cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'json', media_path]
-                fmt_result = subprocess.run(fmt_cmd, capture_output=True, text=True, check=True, timeout=15)
-                fmt_data = json.loads(fmt_result.stdout)
-                duration = fmt_data.get('format', {}).get('duration')
-
-            if duration is None:
-                print(f"FFprobe: no duration found in stream or format metadata")
-                return None, None, None
-
-            return width, height, float(duration)
-        except Exception as e:
-            print(f"FFprobe failed: {e}")
-            return None, None, None
-
-def has_audio_stream(media_path):
-    """Check if a media file contains at least one audio stream."""
+    command = [
+        'ffprobe', '-v', 'error',
+        '-show_entries', 'stream=codec_type,width,height,duration:format=duration',
+        '-of', 'json', media_path
+    ]
     try:
-        cmd = ['ffprobe', '-v', 'error', '-select_streams', 'a', '-show_entries',
-               'stream=index', '-of', 'json', media_path]
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=15)
+        result = subprocess.run(command, capture_output=True, text=True, check=True, timeout=15)
         data = json.loads(result.stdout)
-        return len(data.get('streams', [])) > 0
-    except Exception:
-        return False
+        streams = data.get('streams', [])
+        format_info = data.get('format', {})
+
+        width, height, duration = None, None, None
+        has_audio = False
+
+        for s in streams:
+            if s.get('codec_type') == 'video' and width is None:
+                width = s.get('width')
+                height = s.get('height')
+                duration = s.get('duration')
+            elif s.get('codec_type') == 'audio':
+                has_audio = True
+
+        if duration is None or duration == "N/A":
+            duration = format_info.get('duration')
+
+        if not width or not height or not duration or duration == "N/A":
+            return None, None, None, False
+
+        return width, height, float(duration), has_audio
+    except Exception as e:
+        print(f"FFprobe failed: {e}")
+        return None, None, None, False
 
 def create_caption_image(text, job_id):
     """EXACT COPY OF create_caption_image FROM televideditor.py"""
@@ -476,9 +475,9 @@ def process_video_job_async(chat_id: int, job_data: dict):
             storage_thread = threading.Thread(target=storage_backup_worker, daemon=False)
             storage_thread.start()
 
-        media_w, media_h, final_duration = get_media_dimensions(media_path, media_type)
+        media_w, media_h, final_duration, has_audio = get_media_info(media_path, media_type)
         if not all([media_w, media_h, final_duration]):
-            raise ValueError("Could not get media dimensions via ffprobe.")
+            raise ValueError("Could not get media info via ffprobe.")
 
         # Step 2: Generate Pillow White Banner Caption PNG (EXACT televideditor.py)
         caption_img_path, caption_height = create_caption_image(caption_text, job_id)
@@ -518,17 +517,20 @@ def process_video_job_async(chat_id: int, job_data: dict):
         filter_complex = ";".join(filter_parts)
         map_args = ['-map', '[final_v]']
 
-        if media_type == 'video' and has_audio_stream(media_path):
+        if media_type == 'video' and has_audio:
             filter_complex += ";[1:a]asetpts=PTS-STARTPTS[final_a]"
             map_args.extend(['-map', '[final_a]'])
 
         command.extend([
             '-filter_complex', filter_complex,
+            '-filter_threads', '4',
+            '-filter_complex_threads', '4',
             *map_args,
             '-c:v', 'libx264',
             '-preset', 'ultrafast',
             '-tune', 'zerolatency',
             '-threads', '4',
+            '-slices', '4',
             '-c:a', 'aac',
             '-b:a', '192k',
             '-r', str(FPS),
