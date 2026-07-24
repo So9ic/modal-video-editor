@@ -515,12 +515,16 @@ def process_video_job_async(chat_id: int, job_data: dict):
         filter_complex = ";".join(filter_parts)
         map_args = ['-map', '[final_v]']
 
-        # Audio stream optimization: Use fast copy if already AAC codec
+        # Audio stream optimization: Direct streamcopy for AAC audio, re-encode for other codecs
+        audio_encode_args = []
         if media_type == 'video' and has_audio:
-            filter_complex += ";[1:a]asetpts=PTS-STARTPTS[final_a]"
-            map_args.extend(['-map', '[final_a]'])
-
-        audio_encode_args = ['-c:a', 'copy'] if (media_type == 'video' and has_audio and audio_codec == 'aac') else ['-c:a', 'aac', '-b:a', '192k']
+            if audio_codec == 'aac':
+                map_args.extend(['-map', '1:a?'])
+                audio_encode_args = ['-c:a', 'copy']
+            else:
+                filter_complex += ";[1:a]asetpts=PTS-STARTPTS[final_a]"
+                map_args.extend(['-map', '[final_a]'])
+                audio_encode_args = ['-c:a', 'aac', '-b:a', '192k']
 
         command.extend([
             '-filter_complex', filter_complex,
