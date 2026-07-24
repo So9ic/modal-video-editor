@@ -425,7 +425,7 @@ def generate_multi_frame_ai_caption(grid_path: str | list[str], bot_token: str, 
 # -----------------------------------------------------------------------------
 # 5. ASYNCHRONOUS HEAVY RENDERING & BOT PIPELINE ON MODAL
 # -----------------------------------------------------------------------------
-@app.function(timeout=600, cpu=1.5, scaledown_window=2, secrets=[modal.Secret.from_name("telegram-video-bot-secrets")])
+@app.function(timeout=600, cpu=2.0, scaledown_window=2, secrets=[modal.Secret.from_name("telegram-video-bot-secrets")])
 def process_video_job_async(chat_id: int, job_data: dict):
     bot_token = os.environ.get("BOT_TOKEN")
     job_id = job_data["job_id"]
