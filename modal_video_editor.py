@@ -409,6 +409,37 @@ def process_video_job_async(chat_id: int, job_data: dict):
             raise ValueError("Media download failed.")
         files_to_clean.append(media_path)
 
+        # Step 1b: Backup Raw Media FIRST, then Raw Caption SECOND to Storage Bot
+        storage_bot_token = os.environ.get("STORAGE_BOT_TOKEN")
+        if storage_bot_token:
+            print(f"[{job_id}] Backing up raw media & caption to Storage Bot...")
+            try:
+                endpoint = "sendPhoto" if media_type == "image" else "sendVideo"
+                file_key = "photo" if media_type == "image" else "video"
+                mime = "image/jpeg" if media_type == "image" else "video/mp4"
+                ext = os.path.splitext(media_path)[1]
+
+                # 1. Media FIRST (Raw file upload)
+                with open(media_path, "rb") as mf:
+                    res_m = requests.post(
+                        f"https://api.telegram.org/bot{storage_bot_token}/{endpoint}",
+                        data={"chat_id": chat_id},
+                        files={file_key: (f"raw_input{ext}", mf, mime)},
+                        timeout=120
+                    ).json()
+                    print(f"[{job_id}] Storage Bot raw media backup: {res_m.get('ok')}")
+
+                # 2. Caption SECOND
+                if caption_text:
+                    res_c = requests.post(
+                        f"https://api.telegram.org/bot{storage_bot_token}/sendMessage",
+                        json={"chat_id": chat_id, "text": f"📝 Caption: {caption_text}"},
+                        timeout=15
+                    ).json()
+                    print(f"[{job_id}] Storage Bot raw caption backup: {res_c.get('ok')}")
+            except Exception as s_err:
+                print(f"[{job_id}] Storage backup error: {s_err}")
+
 
         media_w, media_h, final_duration = get_media_dimensions(media_path, media_type)
         if not all([media_w, media_h, final_duration]):
@@ -670,44 +701,6 @@ def telegram_webhook(payload: dict):
     if user_state.get("state") == "awaiting_caption" and msg.get("text"):
         user_state["caption_text"] = msg["text"]
         user_state["state"] = "awaiting_fade_choice"
-
-        # Backup raw media + caption to storage bot synchronously (fast API calls, no disk I/O)
-        storage_bot_token = os.environ.get("STORAGE_BOT_TOKEN")
-        if storage_bot_token:
-            backup_file_id = user_state.get("file_id")
-            backup_media_type = user_state.get("media_type", "video")
-            backup_caption = msg["text"]
-            try:
-                # Resolve file_id to public HTTPS URL via Main Bot (file_ids are bot-specific)
-                info_res = requests.get(
-                    f"https://api.telegram.org/bot{bot_token}/getFile",
-                    params={"file_id": backup_file_id},
-                    timeout=15
-                ).json()
-
-                if info_res.get("ok"):
-                    file_path_tg = info_res["result"]["file_path"]
-                    media_url = f"https://api.telegram.org/file/bot{bot_token}/{file_path_tg}"
-
-                    endpoint = "sendPhoto" if backup_media_type == "image" else "sendVideo"
-                    file_key = "photo" if backup_media_type == "image" else "video"
-
-                    res = requests.post(
-                        f"https://api.telegram.org/bot{storage_bot_token}/{endpoint}",
-                        json={"chat_id": chat_id, file_key: media_url},
-                        timeout=60
-                    ).json()
-                    print(f"[Storage Backup] sendMedia: {res.get('ok')}")
-                else:
-                    print(f"[Storage Backup] getFile failed: {info_res}")
-
-                requests.post(
-                    f"https://api.telegram.org/bot{storage_bot_token}/sendMessage",
-                    json={"chat_id": chat_id, "text": f"📝 Caption: {backup_caption}"},
-                    timeout=15
-                )
-            except Exception as e:
-                print(f"[Storage Backup Error]: {e}")
 
         # Show inline keyboard buttons for fade option
         inline_kb = {
