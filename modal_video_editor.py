@@ -114,14 +114,14 @@ def download_telegram_file(file_id: str, job_id: str, bot_token: str, media_type
     return save_path
 
 def get_media_info(media_path, media_type):
-    """Single-pass probe for width, height, duration, and audio presence."""
+    """Single-pass probe for width, height, duration, audio presence, and audio codec."""
     if media_type == 'image':
         with Image.open(media_path) as img:
-            return img.width, img.height, IMAGE_DURATION, False
+            return img.width, img.height, IMAGE_DURATION, False, ""
 
     command = [
         'ffprobe', '-v', 'error',
-        '-show_entries', 'stream=codec_type,width,height,duration:format=duration',
+        '-show_entries', 'stream=codec_name,codec_type,width,height,duration:format=duration',
         '-of', 'json', media_path
     ]
     try:
@@ -132,6 +132,7 @@ def get_media_info(media_path, media_type):
 
         width, height, duration = None, None, None
         has_audio = False
+        audio_codec = ""
 
         for s in streams:
             if s.get('codec_type') == 'video' and width is None:
@@ -140,17 +141,18 @@ def get_media_info(media_path, media_type):
                 duration = s.get('duration')
             elif s.get('codec_type') == 'audio':
                 has_audio = True
+                audio_codec = s.get('codec_name', '').lower()
 
         if duration is None or duration == "N/A":
             duration = format_info.get('duration')
 
         if not width or not height or not duration or duration == "N/A":
-            return None, None, None, False
+            return None, None, None, False, ""
 
-        return width, height, float(duration), has_audio
+        return width, height, float(duration), has_audio, audio_codec
     except Exception as e:
         print(f"FFprobe failed: {e}")
-        return None, None, None, False
+        return None, None, None, False, ""
 
 def create_caption_image(text, job_id):
     """EXACT COPY OF create_caption_image FROM televideditor.py"""
@@ -165,7 +167,7 @@ def create_caption_image(text, job_id):
     font = ImageFont.truetype(font_path, CAPTION_FONT_SIZE)
     final_lines = [item for line in padded_text.split('\n') for item in textwrap.wrap(line, width=30, break_long_words=True) or ['']]
     wrapped_text = "\n".join(final_lines)
-    dummy_draw = ImageDraw.Draw(Image.new('RGB', (0,0)))
+    dummy_draw = ImageDraw.Draw(Image.new('RGB', (1, 1)))
     text_bbox = dummy_draw.multiline_textbbox((0, 0), wrapped_text, font=font, align="center", spacing=CAPTION_LINE_SPACING)
     text_height = text_bbox[3] - text_bbox[1]
     rect_height = text_height + (2 * CAPTION_V_PADDING) + 6  # extra buffer for font descenders
@@ -208,30 +210,26 @@ def delete_chat_messages(bot_token: str, chat_id: int, msg_ids: list[int]):
 # -----------------------------------------------------------------------------
 def extract_6_frames_grid(video_path: str, duration: float, job_id: str) -> tuple[str, list[str]]:
     """
-    Extracts 6 evenly-spaced JPEG frames in parallel across the video and stitches them
+    Extracts 6 evenly-spaced JPEG frames directly in-RAM via FFmpeg pipe and stitches them
     into a single 2-row x 3-column composite grid image.
     Returns (grid_image_path, temp_files_to_clean).
     """
+    import io
     from concurrent.futures import ThreadPoolExecutor
 
     temp_files = []
 
-    def extract_single_frame(i: int) -> str:
+    def extract_single_frame(i: int) -> Image.Image:
         fraction = (i + 0.5) / 6.0
         timestamp = max(0.0, duration * fraction)
-        f_path = os.path.join(OUTPUT_PATH, f"frame_{job_id}_{i+1}.jpg")
-        cmd = ["ffmpeg", "-y", "-ss", f"{timestamp:.2f}", "-i", video_path, "-vframes", "1", "-q:v", "2", f_path]
-        subprocess.run(cmd, capture_output=True, check=True)
-        return f_path
+        cmd = ["ffmpeg", "-y", "-ss", f"{timestamp:.2f}", "-i", video_path, "-vframes", "1", "-q:v", "2", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"]
+        res = subprocess.run(cmd, capture_output=True, check=True)
+        return Image.open(io.BytesIO(res.stdout))
 
-    # Extract all 6 keyframes concurrently in parallel threads
+    # Extract all 6 keyframes concurrently directly into PIL Image objects in RAM
     with ThreadPoolExecutor(max_workers=6) as executor:
-        frame_paths = list(executor.map(extract_single_frame, range(6)))
+        frames = list(executor.map(extract_single_frame, range(6)))
 
-    temp_files.extend(frame_paths)
-
-    # Load extracted frames to get dimensions
-    frames = [Image.open(fp) for fp in frame_paths]
     w, h = frames[0].size
 
     # Scale cell resolution down to ~540x960 if full-res is high to keep grid size optimal (~1620x1920 total)
@@ -475,7 +473,7 @@ def process_video_job_async(chat_id: int, job_data: dict):
             storage_thread = threading.Thread(target=storage_backup_worker, daemon=False)
             storage_thread.start()
 
-        media_w, media_h, final_duration, has_audio = get_media_info(media_path, media_type)
+        media_w, media_h, final_duration, has_audio, audio_codec = get_media_info(media_path, media_type)
         if not all([media_w, media_h, final_duration]):
             raise ValueError("Could not get media info via ffprobe.")
 
@@ -494,7 +492,7 @@ def process_video_job_async(chat_id: int, job_data: dict):
         caption_y_pos = media_y_pos - caption_height + 1
 
         # Step 4: EXACT FFmpeg Assembly (BLIND COPY FROM televideditor.py)
-        command = ['ffmpeg', '-y', '-f', 'lavfi', '-i', f'color=c={BACKGROUND_COLOR}:s={COMP_SIZE_STR}:d={final_duration}']
+        command = ['ffmpeg', '-y', '-threads', '4', '-f', 'lavfi', '-i', f'color=c={BACKGROUND_COLOR}:s={COMP_SIZE_STR}:d={final_duration}']
         if media_type == 'image':
             command.extend(['-loop', '1', '-t', str(final_duration)])
         command.extend(['-i', media_path, '-i', caption_img_path])
@@ -517,9 +515,12 @@ def process_video_job_async(chat_id: int, job_data: dict):
         filter_complex = ";".join(filter_parts)
         map_args = ['-map', '[final_v]']
 
+        # Audio stream optimization: Use fast copy if already AAC codec
         if media_type == 'video' and has_audio:
             filter_complex += ";[1:a]asetpts=PTS-STARTPTS[final_a]"
             map_args.extend(['-map', '[final_a]'])
+
+        audio_encode_args = ['-c:a', 'copy'] if (media_type == 'video' and has_audio and audio_codec == 'aac') else ['-c:a', 'aac', '-b:a', '192k']
 
         command.extend([
             '-filter_complex', filter_complex,
@@ -528,13 +529,12 @@ def process_video_job_async(chat_id: int, job_data: dict):
             *map_args,
             '-c:v', 'libx264',
             '-preset', 'ultrafast',
-            '-tune', 'zerolatency',
             '-threads', '4',
             '-slices', '4',
-            '-c:a', 'aac',
-            '-b:a', '192k',
+            *audio_encode_args,
             '-r', str(FPS),
             '-pix_fmt', 'yuv420p',
+            '-movflags', '+faststart',
             output_filepath
         ])
 
