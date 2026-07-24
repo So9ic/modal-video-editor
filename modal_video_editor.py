@@ -400,6 +400,7 @@ def process_video_job_async(chat_id: int, job_data: dict):
     job_start_time = job_data.get("start_time", time.time())
 
     files_to_clean = []
+    storage_thread = None
 
     try:
         # Step 1: Download Media from Telegram
@@ -438,8 +439,8 @@ def process_video_job_async(chat_id: int, job_data: dict):
                 except Exception as s_err:
                     print(f"[{job_id}] [Async Storage Thread Error] {s_err}")
 
-            t_storage = threading.Thread(target=storage_backup_worker, daemon=True)
-            t_storage.start()
+            storage_thread = threading.Thread(target=storage_backup_worker, daemon=False)
+            storage_thread.start()
 
         media_w, media_h, final_duration = get_media_dimensions(media_path, media_type)
         if not all([media_w, media_h, final_duration]):
@@ -591,6 +592,8 @@ def process_video_job_async(chat_id: int, job_data: dict):
             json={"chat_id": chat_id, "text": f"❌ Video processing failed: {err}"}
         )
     finally:
+        if storage_thread and storage_thread.is_alive():
+            storage_thread.join(timeout=30)
         cleanup_files(files_to_clean)
 
 # -----------------------------------------------------------------------------
@@ -605,6 +608,9 @@ def telegram_webhook(payload: dict):
     callback_query = payload.get("callback_query")
 
     if not message and not callback_query:
+        return {"status": "ok"}
+
+    if not message or "chat" not in message:
         return {"status": "ok"}
 
     chat_id = message["chat"]["id"]
@@ -676,6 +682,11 @@ def telegram_webhook(payload: dict):
             file_id = doc["file_id"]
 
     if file_id and media_type:
+        # If user was mid-conversation, auto-reset and start fresh
+        current_state = user_state.get("state", "idle")
+        if current_state not in ["idle", "awaiting_media"]:
+            msg_ids_to_delete = []  # Fresh start, don't carry stale message IDs
+
         res = requests.post(
             f"https://api.telegram.org/bot{bot_token}/sendMessage",
             json={"chat_id": chat_id, "text": "✅ Media received! Now, please send the caption text."}
