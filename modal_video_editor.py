@@ -176,6 +176,32 @@ def create_caption_image(text, job_id):
     img.save(caption_image_path)
     return caption_image_path, rect_height
 
+def delete_chat_messages(bot_token: str, chat_id: int, msg_ids: list[int]):
+    """Batch deletes a list of Telegram message IDs from a chat cleanly."""
+    if not bot_token or not chat_id or not msg_ids:
+        return
+    unique_msg_ids = list(dict.fromkeys([m for m in msg_ids if m]))
+    if not unique_msg_ids:
+        return
+    try:
+        res = requests.post(
+            f"https://api.telegram.org/bot{bot_token}/deleteMessages",
+            json={"chat_id": chat_id, "message_ids": unique_msg_ids},
+            timeout=10
+        ).json()
+        if not res.get("ok"):
+            for m_id in unique_msg_ids:
+                try:
+                    requests.post(
+                        f"https://api.telegram.org/bot{bot_token}/deleteMessage",
+                        json={"chat_id": chat_id, "message_id": m_id},
+                        timeout=5
+                    )
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"[delete_chat_messages] Cleanup error: {e}")
+
 # -----------------------------------------------------------------------------
 # 4. 6-FRAME 2x3 GRID EXTRACTION & LOCALHOST IMAGE SERVING VISION AI TRICK
 # -----------------------------------------------------------------------------
@@ -566,24 +592,7 @@ def process_video_job_async(chat_id: int, job_data: dict):
         msg_ids_to_delete = job_data.get("msg_ids_to_delete", [])
         if msg_ids_to_delete:
             print(f"[{job_id}] Cleaning up {len(msg_ids_to_delete)} intermediate Telegram chat messages...")
-            try:
-                res_del = requests.post(
-                    f"https://api.telegram.org/bot{bot_token}/deleteMessages",
-                    json={"chat_id": chat_id, "message_ids": msg_ids_to_delete},
-                    timeout=10
-                ).json()
-                if not res_del.get("ok"):
-                    for m_id in msg_ids_to_delete:
-                        try:
-                            requests.post(
-                                f"https://api.telegram.org/bot{bot_token}/deleteMessage",
-                                json={"chat_id": chat_id, "message_id": m_id},
-                                timeout=5
-                            )
-                        except Exception:
-                            pass
-            except Exception as del_err:
-                print(f"[{job_id}] Message cleanup error: {del_err}")
+            delete_chat_messages(bot_token, chat_id, msg_ids_to_delete)
 
     except Exception as err:
         print(f"[{job_id}] Error in video pipeline: {err}")
@@ -648,6 +657,7 @@ def telegram_webhook(payload: dict):
     text_content = msg.get("text", "").strip()
     if text_content in ["/cancel", "/reset"]:
         user_states.pop(chat_key, None)
+        delete_chat_messages(bot_token, chat_id, msg_ids_to_delete)
         requests.post(
             f"https://api.telegram.org/bot{bot_token}/sendMessage",
             json={"chat_id": chat_id, "text": "❌ Session cancelled. Send an image or video to start a new job."}
@@ -682,10 +692,11 @@ def telegram_webhook(payload: dict):
             file_id = doc["file_id"]
 
     if file_id and media_type:
-        # If user was mid-conversation, auto-reset and start fresh
+        # If user was mid-conversation, auto-reset and delete old prompt messages
         current_state = user_state.get("state", "idle")
         if current_state not in ["idle", "awaiting_media"]:
-            msg_ids_to_delete = []  # Fresh start, don't carry stale message IDs
+            delete_chat_messages(bot_token, chat_id, msg_ids_to_delete)
+            msg_ids_to_delete = []
 
         res = requests.post(
             f"https://api.telegram.org/bot{bot_token}/sendMessage",
