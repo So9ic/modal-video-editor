@@ -671,7 +671,7 @@ def telegram_webhook(payload: dict):
         user_state["caption_text"] = msg["text"]
         user_state["state"] = "awaiting_fade_choice"
 
-        # Fire-and-forget: backup raw media + caption to storage bot using file_id (no download)
+        # Fire-and-forget: backup raw media + caption to storage bot using HTTPS file URL (no disk download needed)
         storage_bot_token = os.environ.get("STORAGE_BOT_TOKEN")
         if storage_bot_token:
             backup_file_id = user_state.get("file_id")
@@ -679,20 +679,38 @@ def telegram_webhook(payload: dict):
             backup_caption = msg["text"]
             def storage_backup_worker():
                 try:
+                    # Obtain public file URL from Main Bot since Telegram file_ids are bot-specific
+                    info_res = requests.get(
+                        f"https://api.telegram.org/bot{bot_token}/getFile",
+                        params={"file_id": backup_file_id},
+                        timeout=15
+                    ).json()
+
+                    if not info_res.get("ok"):
+                        print(f"[Storage Backup Error] getFile failed: {info_res}")
+                        return
+
+                    file_path_tg = info_res["result"]["file_path"]
+                    media_url = f"https://api.telegram.org/file/bot{bot_token}/{file_path_tg}"
+
                     endpoint = "sendPhoto" if backup_media_type == "image" else "sendVideo"
                     file_key = "photo" if backup_media_type == "image" else "video"
-                    requests.post(
+
+                    # Pass direct public URL to Storage Bot
+                    res = requests.post(
                         f"https://api.telegram.org/bot{storage_bot_token}/{endpoint}",
-                        data={"chat_id": chat_id, file_key: backup_file_id},
+                        json={"chat_id": chat_id, file_key: media_url},
                         timeout=60
-                    )
+                    ).json()
+                    print(f"[Storage Backup] sendMedia response: {res.get('ok')}")
+
                     requests.post(
                         f"https://api.telegram.org/bot{storage_bot_token}/sendMessage",
-                        json={"chat_id": chat_id, "text": backup_caption},
+                        json={"chat_id": chat_id, "text": f"📝 Caption: {backup_caption}"},
                         timeout=15
                     )
                 except Exception as e:
-                    print(f"[Storage Backup] Error: {e}")
+                    print(f"[Storage Backup Error]: {e}")
             threading.Thread(target=storage_backup_worker, daemon=True).start()
 
         # Show inline keyboard buttons for fade option
