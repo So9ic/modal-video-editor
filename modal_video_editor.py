@@ -574,10 +574,10 @@ def process_video_job_async(chat_id: int, job_data: dict):
             caption_msg = (
                 f"✅ *AI Caption Generated:*\n\n"
                 f"```\n{ai_caption}\n```\n\n"
-                f"⏱️ *Execution Time Summary:*\n"
-                f"• Video Processing: `{render_elapsed:.2f}s`\n"
-                f"• AI Vision Captioning: `{ai_elapsed:.2f}s`\n"
-                f"• *Total End-to-End Time:* `{total_elapsed:.2f}s`"
+                f"⏱️ *Detailed Execution Breakdown:*\n"
+                f"• 🎬 Video Render & Upload: `{render_elapsed:.2f}s`\n"
+                f"• 🤖 Vision AI Model (`gpt-5.5`): `{ai_elapsed:.2f}s`\n"
+                f"• ⚡ *Total End-to-End Time:* `{total_elapsed:.2f}s`"
             )
             res_c = requests.post(
                 f"https://api.telegram.org/bot{bot_token}/sendMessage",
