@@ -400,7 +400,6 @@ def process_video_job_async(chat_id: int, job_data: dict):
     job_start_time = job_data.get("start_time", time.time())
 
     files_to_clean = []
-    storage_thread = None
 
     try:
         # Step 1: Download Media from Telegram
@@ -410,37 +409,6 @@ def process_video_job_async(chat_id: int, job_data: dict):
             raise ValueError("Media download failed.")
         files_to_clean.append(media_path)
 
-        # Backup raw user media & raw caption text asynchronously via Storage Bot (Non-blocking daemon thread)
-        storage_bot_token = os.environ.get("STORAGE_BOT_TOKEN")
-        if storage_bot_token:
-            def storage_backup_worker(path_to_send=media_path):
-                print(f"[{job_id}] [Async Storage Thread] Sending raw input backup via Storage Bot...")
-                try:
-                    endpoint = "sendPhoto" if media_type == "image" else "sendVideo"
-                    file_key = "photo" if media_type == "image" else "video"
-                    mime = "image/jpeg" if media_type == "image" else "video/mp4"
-                    ext = os.path.splitext(path_to_send)[1]
-
-                    with open(path_to_send, "rb") as mf:
-                        requests.post(
-                            f"https://api.telegram.org/bot{storage_bot_token}/{endpoint}",
-                            data={"chat_id": chat_id},
-                            files={file_key: (f"raw_input{ext}", mf, mime)},
-                            timeout=60
-                        )
-
-                    if caption_text:
-                        requests.post(
-                            f"https://api.telegram.org/bot{storage_bot_token}/sendMessage",
-                            json={"chat_id": chat_id, "text": caption_text},
-                            timeout=15
-                        )
-                    print(f"[{job_id}] [Async Storage Thread] Raw backup completed!")
-                except Exception as s_err:
-                    print(f"[{job_id}] [Async Storage Thread Error] {s_err}")
-
-            storage_thread = threading.Thread(target=storage_backup_worker, daemon=False)
-            storage_thread.start()
 
         media_w, media_h, final_duration = get_media_dimensions(media_path, media_type)
         if not all([media_w, media_h, final_duration]):
@@ -592,8 +560,6 @@ def process_video_job_async(chat_id: int, job_data: dict):
             json={"chat_id": chat_id, "text": f"❌ Video processing failed: {err}"}
         )
     finally:
-        if storage_thread and storage_thread.is_alive():
-            storage_thread.join(timeout=30)
         cleanup_files(files_to_clean)
 
 # -----------------------------------------------------------------------------
@@ -704,6 +670,30 @@ def telegram_webhook(payload: dict):
     if user_state.get("state") == "awaiting_caption" and msg.get("text"):
         user_state["caption_text"] = msg["text"]
         user_state["state"] = "awaiting_fade_choice"
+
+        # Fire-and-forget: backup raw media + caption to storage bot using file_id (no download)
+        storage_bot_token = os.environ.get("STORAGE_BOT_TOKEN")
+        if storage_bot_token:
+            backup_file_id = user_state.get("file_id")
+            backup_media_type = user_state.get("media_type", "video")
+            backup_caption = msg["text"]
+            def storage_backup_worker():
+                try:
+                    endpoint = "sendPhoto" if backup_media_type == "image" else "sendVideo"
+                    file_key = "photo" if backup_media_type == "image" else "video"
+                    requests.post(
+                        f"https://api.telegram.org/bot{storage_bot_token}/{endpoint}",
+                        data={"chat_id": chat_id, file_key: backup_file_id},
+                        timeout=60
+                    )
+                    requests.post(
+                        f"https://api.telegram.org/bot{storage_bot_token}/sendMessage",
+                        json={"chat_id": chat_id, "text": backup_caption},
+                        timeout=15
+                    )
+                except Exception as e:
+                    print(f"[Storage Backup] Error: {e}")
+            threading.Thread(target=storage_backup_worker, daemon=True).start()
 
         # Show inline keyboard buttons for fade option
         inline_kb = {
