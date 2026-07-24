@@ -757,7 +757,7 @@ def telegram_webhook(payload: dict):
         input_text = msg["text"].strip()
         clean_text = input_text.lower()
 
-        if clean_text in ["skip", "no", "none", "n/a"] or clean_text.startswith("skip") or clean_text.startswith("no"):
+        if clean_text in ["skip", "no", "nope", "none", "nah", "n/a"]:
             user_state["extra_details"] = ""
         else:
             user_state["extra_details"] = input_text
