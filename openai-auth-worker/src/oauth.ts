@@ -216,37 +216,49 @@ function generateResultPage(success: boolean, message: string): string {
 <html lang="en">
 <head>
 	<meta charset="UTF-8">
-	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, shrink-to-fit=no, viewport-fit=cover">
 	<title>${title} — OpenAI Auth Proxy</title>
 	<style>
-		* { margin: 0; padding: 0; box-sizing: border-box; }
-		body {
+		* {
+			margin: 0;
+			padding: 0;
+			box-sizing: border-box;
+			touch-action: manipulation;
+			-webkit-tap-highlight-color: transparent;
+		}
+		html, body {
+			width: 100%;
+			height: 100%;
+			overflow-x: hidden;
 			font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 			background: #0a0a0f;
 			color: #e4e4e7;
-			min-height: 100vh;
 			display: flex;
 			align-items: center;
 			justify-content: center;
+			padding: 1rem;
+			-webkit-text-size-adjust: 100%;
 		}
 		.container {
 			text-align: center;
-			padding: 3rem;
+			padding: 2rem 1.5rem;
 			background: rgba(255,255,255,0.03);
 			border: 1px solid rgba(255,255,255,0.08);
-			border-radius: 1.5rem;
+			border-radius: 1.25rem;
 			backdrop-filter: blur(20px);
-			max-width: 480px;
+			width: 100%;
+			max-width: 380px;
 		}
-		.icon { font-size: 4rem; margin-bottom: 1.5rem; }
-		h1 { font-size: 1.5rem; color: ${color}; margin-bottom: 1rem; }
-		p { color: #a1a1aa; line-height: 1.6; }
+		.icon { font-size: 3rem; margin-bottom: 1rem; }
+		h1 { font-size: 1.25rem; color: ${color}; margin-bottom: 0.75rem; }
+		p { color: #a1a1aa; font-size: 0.82rem; line-height: 1.5; word-break: break-all; }
 		.back-link {
 			display: inline-block;
-			margin-top: 2rem;
+			margin-top: 1.5rem;
 			color: #818cf8;
 			text-decoration: none;
-			font-size: 0.9rem;
+			font-size: 0.85rem;
+			font-weight: 600;
 		}
 		.back-link:hover { text-decoration: underline; }
 	</style>
