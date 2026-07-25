@@ -316,7 +316,7 @@ class ProxyManager:
             print(f"[Modal AI] Starting local openai-oauth proxy on port {self.port}...")
             import subprocess
             self.proc = subprocess.Popen(
-                ["openai-oauth", "--port", str(self.port), "--oauth-file", auth_file],
+                ["npx", "--yes", "openai-oauth", "--port", str(self.port), "--oauth-file", auth_file],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE
             )
