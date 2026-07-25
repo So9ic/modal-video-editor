@@ -279,7 +279,77 @@ def upload_single_frame_to_telegram_cdn(file_path: str, bot_token: str, chat_id:
     cdn_url = f"https://api.telegram.org/file/bot{bot_token}/{file_path_tg}"
     return cdn_url
 
-def generate_multi_frame_ai_caption(grid_path: str | list[str], bot_token: str, chat_id: int, extra_details: str = "") -> str:
+class ProxyManager:
+    def __init__(self, worker_url: str, worker_secret: str, port: int = 1455):
+        self.worker_url = worker_url
+        self.worker_secret = worker_secret
+        self.port = port
+        self.proc = None
+        self.error = None
+        self.ready = False
+
+    def boot_in_background(self):
+        try:
+            print("[Modal AI] Fetching fresh OAuth token from Cloudflare Worker Token Manager...")
+            import requests
+            token_req = requests.get(
+                f"{self.worker_url.rstrip('/')}/api/token",
+                headers={"Authorization": f"Bearer {self.worker_secret}"},
+                timeout=15
+            )
+            token_req.raise_for_status()
+            token_data = token_req.json()
+            access_token = token_data.get("access_token")
+            account_id = token_data.get("account_id", "")
+            if not access_token:
+                raise RuntimeError(f"Worker failed to return a valid access_token. Raw data: {token_data}")
+
+            print("[Modal AI] Token acquired. Saving to local auth.json for openai-oauth proxy...")
+            import json
+            import os
+            auth_dir = os.path.expanduser("~/.codex")
+            os.makedirs(auth_dir, exist_ok=True)
+            auth_file = os.path.join(auth_dir, "auth.json")
+            with open(auth_file, "w") as f:
+                json.dump({"tokens": {"access_token": access_token, "account_id": account_id}}, f)
+
+            print(f"[Modal AI] Starting local openai-oauth proxy on port {self.port}...")
+            import subprocess
+            self.proc = subprocess.Popen(
+                ["openai-oauth", "--port", str(self.port), "--oauth-file", auth_file],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+
+            import time
+            for _ in range(30):
+                try:
+                    r = requests.get(f"http://127.0.0.1:{self.port}/v1/models", timeout=1)
+                    if r.status_code == 200:
+                        self.ready = True
+                        break
+                except requests.exceptions.RequestException:
+                    time.sleep(0.5)
+
+            if not self.ready:
+                stdout, stderr = self.proc.communicate()
+                raise RuntimeError(f"Failed to start local proxy. stdout: {stdout.decode()} stderr: {stderr.decode()}")
+        except Exception as e:
+            self.error = e
+
+    def terminate(self):
+        if self.proc:
+            try:
+                print(f"[Modal AI] Terminating local proxy (PID: {self.proc.pid})...")
+                self.proc.terminate()
+                self.proc.wait(timeout=5)
+            except Exception as e:
+                print(f"[Modal AI] Error during proxy termination: {e}")
+            finally:
+                self.proc = None
+
+
+def generate_multi_frame_ai_caption(grid_path: str | list[str], bot_token: str, chat_id: int, proxy_manager: ProxyManager, proxy_thread, extra_details: str = "") -> str:
     """
     Ultra-Fast Single-Request 2x3 Grid Vision AI via Cloudflare Worker Proxy:
     Uploads stitched 2x3 grid image to Telegram CDN, then calls the Cloudflare
@@ -298,65 +368,13 @@ def generate_multi_frame_ai_caption(grid_path: str | list[str], bot_token: str, 
         "image_url": {"url": cdn_url}
     }]
 
-    # 1. Fetch fresh OAuth token from Cloudflare Worker
-    worker_url = os.environ.get("WORKER_URL", "")
-    worker_secret = os.environ.get("WORKER_SECRET", "")
-
-    if not worker_url or not worker_secret:
-        raise RuntimeError("WORKER_URL and WORKER_SECRET must be set in Modal secrets")
-
-    print(f"[Modal AI] Fetching fresh OAuth token from Cloudflare Worker Token Manager...")
-    try:
-        token_req = requests.get(
-            f"{worker_url.rstrip('/')}/api/token",
-            headers={"Authorization": f"Bearer {worker_secret}"},
-            timeout=15
-        )
-        token_req.raise_for_status()
-        token_data = token_req.json()
-    except Exception as e:
-        raise RuntimeError(f"Failed to fetch token from worker: {e} - Response: {getattr(e.response, 'text', '')}")
-
-    access_token = token_data.get("access_token")
-    account_id = token_data.get("account_id", "")
+    print(f"[Modal AI] Waiting for background proxy to finish booting (if not already)...")
+    proxy_thread.join()
     
-    if not access_token:
-        raise RuntimeError(f"Worker failed to return a valid access_token. Raw data: {token_data}")
-
-    print(f"[Modal AI] Token acquired. Saving to local auth.json for openai-oauth proxy...")
-
-    # 2. Write auth.json for the local proxy
-    import json
-    auth_dir = os.path.expanduser("~/.codex")
-    os.makedirs(auth_dir, exist_ok=True)
-    auth_file = os.path.join(auth_dir, "auth.json")
-    with open(auth_file, "w") as f:
-        json.dump({"tokens": {"access_token": access_token, "account_id": account_id}}, f)
-
-    # 3. Spawn the local openai-oauth proxy in a subprocess
-    print(f"[Modal AI] Starting local openai-oauth proxy on port 1455...")
-    proxy_proc = subprocess.Popen(
-        ["openai-oauth", "--port", "1455", "--oauth-file", auth_file],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
-    )
-
-    # Wait for the proxy to be ready
-    import time
-    proxy_ready = False
-    for _ in range(30):
-        try:
-            r = requests.get("http://127.0.0.1:1455/v1/models", timeout=1)
-            if r.status_code == 200:
-                proxy_ready = True
-                break
-        except requests.exceptions.RequestException:
-            time.sleep(0.5)
-
-    if not proxy_ready:
-        proxy_proc.terminate()
-        stdout, stderr = proxy_proc.communicate()
-        raise RuntimeError(f"Failed to start local proxy. stdout: {stdout.decode()} stderr: {stderr.decode()}")
+    if proxy_manager.error:
+        raise RuntimeError(f"Background proxy failed to boot: {proxy_manager.error}")
+    if not proxy_manager.ready:
+        raise RuntimeError("Background proxy is not ready but thread exited without explicit error.")
 
     print(f"[Modal AI] Local proxy is ready! Sending request...")
 
@@ -365,7 +383,7 @@ def generate_multi_frame_ai_caption(grid_path: str | list[str], bot_token: str, 
     import httpx
 
     client = OpenAI(
-        base_url="http://127.0.0.1:1455/v1",
+        base_url=f"http://127.0.0.1:{proxy_manager.port}/v1",
         api_key="dummy-key-not-used-by-local-proxy",
     )
 
@@ -402,25 +420,20 @@ def generate_multi_frame_ai_caption(grid_path: str | list[str], bot_token: str, 
         "- Plain text only. Do NOT use markdown bold/italic asterisks or hyphens inside the text body."
     )
 
-    try:
-        res = client.chat.completions.create(
-            model="gpt-5.5",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        *image_payloads
-                    ]
-                }
-            ],
-            timeout=120
-        )
-        return res.choices[0].message.content.strip()
-    finally:
-        print(f"[Modal AI] Terminating local proxy...")
-        proxy_proc.terminate()
-        proxy_proc.wait()
+    res = client.chat.completions.create(
+        model="gpt-5.5",
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    *image_payloads
+                ]
+            }
+        ],
+        timeout=120
+    )
+    return res.choices[0].message.content.strip()
 
 # -----------------------------------------------------------------------------
 # 5. ASYNCHRONOUS HEAVY RENDERING & BOT PIPELINE ON MODAL
@@ -436,6 +449,16 @@ def process_video_job_async(chat_id: int, job_data: dict):
 
     files_to_clean = []
     storage_thread = None
+
+    worker_url = os.environ.get("WORKER_URL", "")
+    worker_secret = os.environ.get("WORKER_SECRET", "")
+    if not worker_url or not worker_secret:
+        raise ValueError("WORKER_URL and WORKER_SECRET must be set in Modal secrets")
+
+    proxy_manager = ProxyManager(worker_url, worker_secret, port=1455)
+    import threading
+    proxy_thread = threading.Thread(target=proxy_manager.boot_in_background, daemon=False)
+    proxy_thread.start()
 
     try:
         # Step 1: Download Media from Telegram
@@ -572,7 +595,7 @@ def process_video_job_async(chat_id: int, job_data: dict):
         print(f"[{job_id}] Generating AI Caption using 2x3 grid Vision trick (Free ChatGPT via Telegram CDN)...")
         ai_start_time = time.time()
         try:
-            ai_caption = generate_multi_frame_ai_caption(grid_path, bot_token, chat_id, extra_details=extra_details)
+            ai_caption = generate_multi_frame_ai_caption(grid_path, bot_token, chat_id, proxy_manager, proxy_thread, extra_details=extra_details)
             ai_elapsed = time.time() - ai_start_time
             total_elapsed = time.time() - job_start_time
 
@@ -615,6 +638,8 @@ def process_video_job_async(chat_id: int, job_data: dict):
             json={"chat_id": chat_id, "text": f"❌ Video processing failed: {err}"}
         )
     finally:
+        if 'proxy_manager' in locals():
+            proxy_manager.terminate()
         if storage_thread and storage_thread.is_alive():
             storage_thread.join(timeout=30)
         cleanup_files(files_to_clean)
@@ -832,7 +857,21 @@ def test_ai_vision_remote():
     img.save(sample_frame, "JPEG")
     
     print(f"[Remote Test] Created sample frame at {sample_frame}")
-    return generate_multi_frame_ai_caption(sample_frame, bot_token=bot_token, chat_id=0)
+    
+    worker_url = os.environ.get("WORKER_URL", "")
+    worker_secret = os.environ.get("WORKER_SECRET", "")
+    if not worker_url or not worker_secret:
+        raise ValueError("WORKER_URL and WORKER_SECRET must be set in Modal secrets")
+    
+    proxy_manager = ProxyManager(worker_url, worker_secret, port=1455)
+    import threading
+    proxy_thread = threading.Thread(target=proxy_manager.boot_in_background, daemon=False)
+    proxy_thread.start()
+    
+    try:
+        return generate_multi_frame_ai_caption(sample_frame, bot_token=bot_token, chat_id=0, proxy_manager=proxy_manager, proxy_thread=proxy_thread)
+    finally:
+        proxy_manager.terminate()
 
 @app.local_entrypoint()
 def main():
