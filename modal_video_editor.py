@@ -28,6 +28,11 @@ if os.path.exists(font_file_path):
     image_builder = image_builder.add_local_file(font_file_path, remote_path="/root/Montserrat-ExtraBold.ttf")
     image_builder = image_builder.add_local_file(font_file_path, remote_path="/Montserrat-ExtraBold.ttf")
 
+watermark_font_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "RobotoCondensed-VariableFont_wght.ttf")
+if os.path.exists(watermark_font_path):
+    image_builder = image_builder.add_local_file(watermark_font_path, remote_path="/root/RobotoCondensed-VariableFont_wght.ttf")
+    image_builder = image_builder.add_local_file(watermark_font_path, remote_path="/RobotoCondensed-VariableFont_wght.ttf")
+
 image = image_builder
 
 app = modal.App("televideditor-modal", image=image)
@@ -582,9 +587,20 @@ def process_video_job_async(chat_id: int, job_data: dict):
             ])
             media_layer = "[media_with_fade]"
 
+        font_path = "/root/RobotoCondensed-VariableFont_wght.ttf"
+        if not os.path.exists(font_path):
+            font_path = "/RobotoCondensed-VariableFont_wght.ttf"
+        if not os.path.exists(font_path):
+            font_path = "RobotoCondensed-VariableFont_wght.ttf"
+
+        media_center_y = int((COMP_HEIGHT / 2) + MEDIA_Y_OFFSET)
+        watermark_y = media_center_y + 150
         filter_parts.extend([
             f"[0:v]{media_layer}overlay=(W-w)/2:{media_y_pos}[bg_with_media]",
-            f"[bg_with_media][2:v]overlay=(W-w)/2:{caption_y_pos}[final_v]"
+            f"[bg_with_media][2:v]overlay=(W-w)/2:{caption_y_pos}[with_caption]",
+            f"color=c=#808080:s={COMP_SIZE_STR}:d={final_duration}[gray_bg]",
+            f"[gray_bg]drawtext=fontfile='{font_path}':text='knowledgemaxxing':fontcolor=white@0.35:borderw=1:bordercolor=white@0.35:shadowcolor=black@0.35:shadowx=3:shadowy=3:fontsize=36:x=135:y={watermark_y}-(text_h/2)[watermark_layer]",
+            f"[with_caption][watermark_layer]blend=all_mode=hardlight:all_opacity=1[final_v]"
         ])
 
         filter_complex = ";".join(filter_parts)
