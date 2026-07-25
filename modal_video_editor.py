@@ -251,6 +251,9 @@ def extract_6_frames_grid(video_path: str, duration: float, job_id: str) -> tupl
 
 def upload_single_frame_to_telegram_cdn(file_path: str, bot_token: str, chat_id: int) -> str:
     """Uploads a single frame JPEG to Telegram CDN and returns direct public HTTPS URL."""
+    if chat_id == 0:
+        return "https://dummy.telegram.cdn/sample.jpg"
+
     url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
     with open(file_path, "rb") as f:
         res = requests.post(url, data={"chat_id": chat_id}, files={"photo": ("frame.jpg", f, "image/jpeg")}, timeout=30).json()
@@ -290,9 +293,13 @@ def generate_multi_frame_ai_caption(grid_path: str | list[str], bot_token: str, 
     cdn_url = upload_single_frame_to_telegram_cdn(grid_path, bot_token, chat_id)
     print(f"[Modal AI] Grid Frame Telegram CDN URL: {cdn_url}")
 
+    import base64
+    with open(grid_path, "rb") as image_file:
+        base64_image = base64.b64encode(image_file.read()).decode('utf-8')
+
     image_payloads = [{
         "type": "image_url",
-        "image_url": {"url": cdn_url}
+        "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
     }]
 
     # 1. Fetch fresh OAuth token from Cloudflare Worker
@@ -401,7 +408,7 @@ def generate_multi_frame_ai_caption(grid_path: str | list[str], bot_token: str, 
 
     try:
         res = client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-5.5",
             messages=[
                 {
                     "role": "user",
