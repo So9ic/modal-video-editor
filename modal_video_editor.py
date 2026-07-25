@@ -520,7 +520,12 @@ def process_video_job_async(chat_id: int, job_data: dict):
                     raw_grid_path = media_path
                     temp_frame_files = []
                 else:
-                    raw_grid_path, temp_frame_files = extract_6_frames_grid(media_path, final_duration, job_id)
+                    try:
+                        raw_grid_path, temp_frame_files = extract_6_frames_grid(media_path, final_duration, job_id)
+                    except Exception as grid_err:
+                        print(f"[{job_id}] Grid extraction failed: {grid_err}, using fallback single frame.")
+                        raw_grid_path = media_path
+                        temp_frame_files = []
                 files_to_clean.extend(temp_frame_files)
                 
                 print(f"[{job_id}] [Async AI] Requesting AI Caption while video renders...")
