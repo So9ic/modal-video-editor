@@ -519,13 +519,20 @@ def process_video_job_async(chat_id: int, job_data: dict):
                 files_to_clean.extend(temp_frame_files)
                 
                 print(f"[{job_id}] [Async AI] Requesting AI Caption while video renders...")
+                
+                # Combine both the meme text and the creator's extra notes so the AI knows exactly what's on the screen
+                ai_context = f"Text written on the video: \"{caption_text}\""
+                user_notes = job_data.get("extra_details", "").strip()
+                if user_notes:
+                    ai_context += f"\nAdditional Context from Creator: \"{user_notes}\""
+
                 ai_caption_text = generate_multi_frame_ai_caption(
                     raw_grid_path, 
                     bot_token, 
                     chat_id, 
                     proxy_manager, 
                     proxy_thread, 
-                    extra_details=job_data.get("extra_details", "")
+                    extra_details=ai_context
                 )
                 ai_result_box["caption"] = ai_caption_text
                 ai_result_box["elapsed"] = time.time() - ai_start
