@@ -293,13 +293,9 @@ def generate_multi_frame_ai_caption(grid_path: str | list[str], bot_token: str, 
     cdn_url = upload_single_frame_to_telegram_cdn(grid_path, bot_token, chat_id)
     print(f"[Modal AI] Grid Frame Telegram CDN URL: {cdn_url}")
 
-    import base64
-    with open(grid_path, "rb") as image_file:
-        base64_image = base64.b64encode(image_file.read()).decode('utf-8')
-
     image_payloads = [{
         "type": "image_url",
-        "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
+        "image_url": {"url": cdn_url}
     }]
 
     # 1. Fetch fresh OAuth token from Cloudflare Worker
