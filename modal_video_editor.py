@@ -508,6 +508,35 @@ def process_video_job_async(chat_id: int, job_data: dict):
         caption_img_path, caption_height = create_caption_image(caption_text, job_id)
         files_to_clean.append(caption_img_path)
 
+        # Step 2.5: Kick off AI Vision Pipeline entirely in parallel using RAW media!
+        # Since caption_text is provided to the AI prompt as `extra_details`, it doesn't need to see the overlaid text.
+        ai_result_box = {}
+        def background_ai_pipeline():
+            print(f"[{job_id}] [Async AI] Extracting grid from raw media in parallel...")
+            try:
+                ai_start = time.time()
+                raw_grid_path, temp_frame_files = extract_6_frames_grid(media_path, final_duration, job_id)
+                files_to_clean.extend(temp_frame_files)
+                
+                print(f"[{job_id}] [Async AI] Requesting AI Caption while video renders...")
+                ai_caption_text = generate_multi_frame_ai_caption(
+                    raw_grid_path, 
+                    bot_token, 
+                    chat_id, 
+                    proxy_manager, 
+                    proxy_thread, 
+                    extra_details=job_data.get("extra_details", "")
+                )
+                ai_result_box["caption"] = ai_caption_text
+                ai_result_box["elapsed"] = time.time() - ai_start
+                print(f"[{job_id}] [Async AI] AI Caption generated successfully in background!")
+            except Exception as e:
+                print(f"[{job_id}] [Async AI Error] {e}")
+                ai_result_box["error"] = e
+
+        ai_thread = threading.Thread(target=background_ai_pipeline, daemon=False)
+        ai_thread.start()
+
         output_filepath = os.path.join(OUTPUT_PATH, f"output_{job_id}.mp4")
         files_to_clean.append(output_filepath)
 
@@ -572,10 +601,6 @@ def process_video_job_async(chat_id: int, job_data: dict):
 
         print(f"[{job_id}] Video rendered successfully.")
 
-        # Step 5: Extract 6 Evenly-Spaced Frames & Stitch into 2x3 Grid for AI Vision
-        grid_path, temp_frame_files = extract_6_frames_grid(output_filepath, final_duration, job_id)
-        files_to_clean.extend(temp_frame_files)
-
         # Step 6: Send Final Video to Telegram User in background thread
         def send_video_bg():
             print(f"[{job_id}] Sending final video to Telegram (background)...")
@@ -597,13 +622,26 @@ def process_video_job_async(chat_id: int, job_data: dict):
         video_done_time = time.time()
         render_elapsed = video_done_time - job_start_time
 
-        # Step 7: Generate & Send 6-Frame 2x3 Grid AI Caption
-        extra_details = job_data.get("extra_details", "")
-        print(f"[{job_id}] Generating AI Caption using 2x3 grid Vision trick (Free ChatGPT via Telegram CDN)...")
-        ai_start_time = time.time()
-        try:
-            ai_caption = generate_multi_frame_ai_caption(grid_path, bot_token, chat_id, proxy_manager, proxy_thread, extra_details=extra_details)
-            ai_elapsed = time.time() - ai_start_time
+        # Step 7: Wait for AI Pipeline & Send Caption
+        print(f"[{job_id}] Waiting for background AI pipeline to finish...")
+        if ai_thread.is_alive():
+            ai_thread.join(timeout=120)
+
+        if "error" in ai_result_box:
+            ai_err = ai_result_box["error"]
+            print(f"[{job_id}] AI Vision generation error: {ai_err}")
+            total_elapsed = time.time() - job_start_time
+            requests.post(
+                f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                json={
+                    "chat_id": chat_id,
+                    "text": f"⚠️ Video ready in `{render_elapsed:.2f}s`, but AI caption failed: {ai_err}\n\n⏱️ Total Time: `{total_elapsed:.2f}s`",
+                    "parse_mode": "Markdown"
+                }
+            )
+        else:
+            ai_caption = ai_result_box.get("caption", "Failed to generate caption.")
+            ai_elapsed = ai_result_box.get("elapsed", 0.0)
             
             # Ensure video is fully uploaded before we send the caption to guarantee order
             if video_thread.is_alive():
@@ -626,17 +664,7 @@ def process_video_job_async(chat_id: int, job_data: dict):
                 timeout=30
             ).json()
             print(f"[{job_id}] Telegram sendMessage response: {res_c.get('ok')}")
-        except Exception as ai_err:
-            print(f"[{job_id}] AI Vision generation error: {ai_err}")
-            total_elapsed = time.time() - job_start_time
-            requests.post(
-                f"https://api.telegram.org/bot{bot_token}/sendMessage",
-                json={
-                    "chat_id": chat_id,
-                    "text": f"⚠️ Video ready in `{render_elapsed:.2f}s`, but AI caption failed: {ai_err}\n\n⏱️ Total Time: `{total_elapsed:.2f}s`",
-                    "parse_mode": "Markdown"
-                }
-            )
+
 
         # Step 8: Clean up all prior intermediate chat messages
         msg_ids_to_delete = job_data.get("msg_ids_to_delete", [])
@@ -653,6 +681,8 @@ def process_video_job_async(chat_id: int, job_data: dict):
     finally:
         if 'proxy_manager' in locals():
             proxy_manager.terminate()
+        if 'ai_thread' in locals() and ai_thread.is_alive():
+            ai_thread.join(timeout=30)
         if 'video_thread' in locals() and video_thread.is_alive():
             video_thread.join(timeout=120)
         if storage_thread and storage_thread.is_alive():
