@@ -515,7 +515,12 @@ def process_video_job_async(chat_id: int, job_data: dict):
             print(f"[{job_id}] [Async AI] Extracting grid from raw media in parallel...")
             try:
                 ai_start = time.time()
-                raw_grid_path, temp_frame_files = extract_6_frames_grid(media_path, final_duration, job_id)
+                if media_type == "image":
+                    print(f"[{job_id}] [Async AI] Input is an image, skipping 6-frame grid extraction.")
+                    raw_grid_path = media_path
+                    temp_frame_files = []
+                else:
+                    raw_grid_path, temp_frame_files = extract_6_frames_grid(media_path, final_duration, job_id)
                 files_to_clean.extend(temp_frame_files)
                 
                 print(f"[{job_id}] [Async AI] Requesting AI Caption while video renders...")
