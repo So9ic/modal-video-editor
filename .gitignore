@@ -50,12 +50,24 @@ pytestdebug.cache
 
 # Environments
 .env
+*.env
+.dev.vars
 .venv
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
+
+# Node / Cloudflare Worker
+node_modules/
+.wrangler/
+
+# Sensitive / Auth Files
+auth.json
+.codex/
+*.pem
+*.key
 
 # macOS / IDE
 .DS_Store

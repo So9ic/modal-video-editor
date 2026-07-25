@@ -13,24 +13,15 @@ from fastapi.responses import Response, JSONResponse
 import modal
 
 # -----------------------------------------------------------------------------
-# 1. MODAL IMAGE & APP DEFINITION (EXACT COPIED PIPELINE FROM televideditor.py)
+# 1. MODAL IMAGE & APP DEFINITION
 # -----------------------------------------------------------------------------
-auth_file_path = os.path.expanduser("~/.codex/auth.json")
 font_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Montserrat-ExtraBold.ttf")
 
 image_builder = (
     modal.Image.debian_slim()
-    .apt_install("ffmpeg", "fonts-freefont-ttf", "curl")
-    .run_commands(
-        "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -",
-        "apt-get install -y nodejs"
-    )
+    .apt_install("ffmpeg", "fonts-freefont-ttf")
     .pip_install("requests", "pillow", "openai", "fastapi[standard]")
-    .run_commands("npm install -g openai-oauth@latest")
 )
-
-if os.path.exists(auth_file_path):
-    image_builder = image_builder.add_local_file(auth_file_path, remote_path="/root/.codex/auth.json")
 
 if os.path.exists(font_file_path):
     image_builder = image_builder.add_local_file(font_file_path, remote_path="/root/Montserrat-ExtraBold.ttf")
@@ -286,10 +277,10 @@ def upload_single_frame_to_telegram_cdn(file_path: str, bot_token: str, chat_id:
 
 def generate_multi_frame_ai_caption(grid_path: str | list[str], bot_token: str, chat_id: int, extra_details: str = "") -> str:
     """
-    Ultra-Fast Single-Request 2x3 Grid Vision AI:
-    Uploads stitched 2x3 grid image to Telegram CDN, launches local openai-oauth proxy
-    explicitly referencing --oauth-file /root/.codex/auth.json, and calls http://127.0.0.1:10531/v1
-    (gpt-5.5) for 100% FREE AI Vision!
+    Ultra-Fast Single-Request 2x3 Grid Vision AI via Cloudflare Worker Proxy:
+    Uploads stitched 2x3 grid image to Telegram CDN, then calls the Cloudflare
+    Worker (which manages OAuth tokens in KV and auto-refreshes them) as a
+    standard OpenAI-compatible endpoint. No local auth.json or proxy needed.
     """
     if isinstance(grid_path, list):
         grid_path = grid_path[0]
@@ -303,124 +294,66 @@ def generate_multi_frame_ai_caption(grid_path: str | list[str], bot_token: str, 
         "image_url": {"url": cdn_url}
     }]
 
-    auth_file = "/root/.codex/auth.json"
-    if not os.path.exists(auth_file):
-        auth_file = os.path.expanduser("~/.codex/auth.json")
+    # Connect to Cloudflare Worker proxy (handles token refresh automatically)
+    worker_url = os.environ.get("WORKER_URL", "")
+    worker_secret = os.environ.get("WORKER_SECRET", "")
 
-    env = dict(os.environ)
-    env["NO_PROXY"] = "127.0.0.1,localhost,::1"
-    env["no_proxy"] = "127.0.0.1,localhost,::1"
+    if not worker_url or not worker_secret:
+        raise RuntimeError("WORKER_URL and WORKER_SECRET must be set in Modal secrets")
 
-    proxy_proc = None
-    proxy_already_running = False
+    from openai import OpenAI
+    client = OpenAI(base_url=f"{worker_url.rstrip('/')}/v1", api_key=worker_secret)
 
-    # Check if proxy is already running and responsive on port 10531
-    try:
-        r = requests.get("http://127.0.0.1:10531/v1/models", timeout=1)
-        if r.status_code == 200:
-            print("[Modal AI Proxy] Existing openai-oauth proxy detected and online!")
-            proxy_already_running = True
-    except Exception:
-        pass
+    print(f"[Modal AI] Sending Vision request via Cloudflare Worker proxy...")
 
-    if not proxy_already_running:
-        # Kill any lingering zombie proxy process before starting a new instance
-        try:
-            subprocess.run(["pkill", "-9", "-f", "openai-oauth"], capture_output=True)
-            time.sleep(0.5)
-        except Exception:
-            pass
-
-        print(f"[Modal AI] Launching embedded openai-oauth proxy with --oauth-file {auth_file}...")
-        proxy_proc = subprocess.Popen(
-            ["openai-oauth", "--oauth-file", auth_file, "--no-open"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=env
+    extra_context_block = ""
+    if extra_details and extra_details.strip():
+        extra_context_block = (
+            f"\n\nADDITIONAL USER CONTEXT & DETAILS:\n"
+            f"The creator provided the following specific background notes about what is happening in this video:\n"
+            f"\"{extra_details.strip()}\"\n"
+            f"Carefully incorporate and reference these user-provided details into your story deduction and explanation. "
+            f"Use this context to ensure 100% precision in your scientific, technical, or meme breakdown, while keeping your tone effortlessly cool and engaging."
         )
 
-        # Wait up to 10 seconds to ensure server port 10531 is bound
-        online = False
-        for _ in range(20):
-            time.sleep(0.5)
-            poll_code = proxy_proc.poll()
-            if poll_code is not None:
-                stdout, stderr = proxy_proc.communicate()
-                print(f"[Modal AI Proxy Error] Exited with code {poll_code}!\nSTDOUT: {stdout}\nSTDERR: {stderr}")
-                raise RuntimeError(f"openai-oauth exited early with code {poll_code}: {stderr or stdout}")
+    prompt = (
+        "Developer: You are a cool, witty, Gen-Z viral content creator and meme/science explainer for Instagram Reels.\n"
+        "You are analyzing a video clip provided as a single composite image containing 6 chronological visual keyframes arranged in a 2-row by 3-column grid (Top row left-to-right: frames 1, 2, 3; Bottom row left-to-right: frames 4, 5, 6).\n"
+        "Some keyframes may capture slight motion blur or transition states—use your intuition to deduce the complete story, joke, or scientific phenomenon happening in the video from frame 1 through frame 6."
+        f"{extra_context_block}\n\n"
+        "PERSONALITY & STYLE:\n"
+        "- Tone: Effortlessly cool, witty, modern Reddit/Gen-Z vibe (e.g. 'lowkey', 'bro really thought', 'living rent free', subtle sarcasm). Keep it natural, sharp, and relatable—never cringe or forced.\n"
+        "- Explanation style: Simple, fascinating, and 100% accurate. Break down the real science, engineering, physics, or meme lore behind the clip so anyone understands it instantly.\n\n"
+        "CRITICAL DIRECTIVES:\n"
+        "1. NEVER mention words like 'frames', 'grid', 'snapshots', 'images', 'screenshots', 'slides', 'pictures', or 'still images'. Speak naturally about 'the video', 'the clip', or the action.\n"
+        "2. Follow the EXACT format below:\n\n"
+        "[Witty, modern Gen-Z / Reddit-style opening line or sarcastic observation about what happens in the video clip.]\n"
+        "---------------------------------------\n"
+        "➡️ Explanation:\n"
+        "----------------\n"
+        "[Provide a simple, clear, and genuinely informative breakdown of the real science, concept, or meme lore behind the video.]\n"
+        "---------------------------------------\n"
+        "[10 trending, relevant hashtags space-separated, e.g., #science #viral #fyp #explorepage #memes]\n\n"
+        "Rules:\n"
+        "- Strictly maintain the separator lines (---------------------------------------).\n"
+        "- Plain text only. Do NOT use markdown bold/italic asterisks or hyphens inside the text body."
+    )
 
-            try:
-                r = requests.get("http://127.0.0.1:10531/v1/models", timeout=1)
-                if r.status_code == 200:
-                    print("[Modal AI Proxy] openai-oauth proxy is online!")
-                    online = True
-                    break
-            except Exception:
-                pass
+    res = client.chat.completions.create(
+        model="gpt-5.5",
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    *image_payloads
+                ]
+            }
+        ],
+        timeout=90
+    )
 
-        if not online:
-            raise RuntimeError("openai-oauth proxy failed to start on port 10531 within timeout.")
-
-    try:
-        from openai import OpenAI
-        client = OpenAI(base_url="http://127.0.0.1:10531/v1", api_key="not-needed")
-
-        extra_context_block = ""
-        if extra_details and extra_details.strip():
-            extra_context_block = (
-                f"\n\nADDITIONAL USER CONTEXT & DETAILS:\n"
-                f"The creator provided the following specific background notes about what is happening in this video:\n"
-                f"\"{extra_details.strip()}\"\n"
-                f"Carefully incorporate and reference these user-provided details into your story deduction and explanation. "
-                f"Use this context to ensure 100% precision in your scientific, technical, or meme breakdown, while keeping your tone effortlessly cool and engaging."
-            )
-
-        prompt = (
-            "Developer: You are a cool, witty, Gen-Z viral content creator and meme/science explainer for Instagram Reels.\n"
-            "You are analyzing a video clip provided as a single composite image containing 6 chronological visual keyframes arranged in a 2-row by 3-column grid (Top row left-to-right: frames 1, 2, 3; Bottom row left-to-right: frames 4, 5, 6).\n"
-            "Some keyframes may capture slight motion blur or transition states—use your intuition to deduce the complete story, joke, or scientific phenomenon happening in the video from frame 1 through frame 6."
-            f"{extra_context_block}\n\n"
-            "PERSONALITY & STYLE:\n"
-            "- Tone: Effortlessly cool, witty, modern Reddit/Gen-Z vibe (e.g. 'lowkey', 'bro really thought', 'living rent free', subtle sarcasm). Keep it natural, sharp, and relatable—never cringe or forced.\n"
-            "- Explanation style: Simple, fascinating, and 100% accurate. Break down the real science, engineering, physics, or meme lore behind the clip so anyone understands it instantly.\n\n"
-            "CRITICAL DIRECTIVES:\n"
-            "1. NEVER mention words like 'frames', 'grid', 'snapshots', 'images', 'screenshots', 'slides', 'pictures', or 'still images'. Speak naturally about 'the video', 'the clip', or the action.\n"
-            "2. Follow the EXACT format below:\n\n"
-            "[Witty, modern Gen-Z / Reddit-style opening line or sarcastic observation about what happens in the video clip.]\n"
-            "---------------------------------------\n"
-            "➡️ Explanation:\n"
-            "----------------\n"
-            "[Provide a simple, clear, and genuinely informative breakdown of the real science, concept, or meme lore behind the video.]\n"
-            "---------------------------------------\n"
-            "[10 trending, relevant hashtags space-separated, e.g., #science #viral #fyp #explorepage #memes]\n\n"
-            "Rules:\n"
-            "- Strictly maintain the separator lines (---------------------------------------).\n"
-            "- Plain text only. Do NOT use markdown bold/italic asterisks or hyphens inside the text body."
-        )
-
-        res = client.chat.completions.create(
-            model="gpt-5.5",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        *image_payloads
-                    ]
-                }
-            ],
-            timeout=90
-        )
-
-        return res.choices[0].message.content.strip()
-    finally:
-        if proxy_proc and proxy_proc.poll() is None:
-            proxy_proc.terminate()
-            try:
-                proxy_proc.wait(timeout=2)
-            except Exception:
-                proxy_proc.kill()
+    return res.choices[0].message.content.strip()
 
 # -----------------------------------------------------------------------------
 # 5. ASYNCHRONOUS HEAVY RENDERING & BOT PIPELINE ON MODAL

@@ -1,0 +1,19 @@
+name = "openai-auth-proxy"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+
+# KV namespace — create with: npx wrangler kv namespace create AUTH_KV
+# Then paste the id below
+[[kv_namespaces]]
+binding = "AUTH_KV"
+id = "af6061a0f5a74e13a484cf0785b7f0b7"
+
+# Secrets (set via `npx wrangler secret put <NAME>`):
+# - WORKER_SECRET: Bearer token that Modal uses to authenticate
+# - KV_ENCRYPTION_KEY: 32-byte hex key for AES-256-GCM encryption of tokens in KV
+# - DASHBOARD_PASSWORD: Password for the web dashboard
+
+[vars]
+WORKER_URL = "https://openai-auth-proxy.kmxconnect.workers.dev"
+
