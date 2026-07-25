@@ -4,7 +4,7 @@
 import { saveTokens, type AuthData } from "./token-manager";
 
 const OPENAI_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
-const OPENAI_AUTHORIZE_URL = "https://auth.openai.com/authorize";
+const OPENAI_AUTHORIZE_URL = "https://auth.openai.com/oauth/authorize";
 const OPENAI_TOKEN_URL = "https://auth.openai.com/oauth/token";
 const OAUTH_SCOPE = "openid profile email offline_access";
 const PKCE_KV_PREFIX = "pkce:";
@@ -30,9 +30,17 @@ async function generateCodeChallenge(verifier: string): Promise<string> {
 	return bytesToBase64Url(new Uint8Array(digest));
 }
 
-function generateState(): string {
-	const bytes = crypto.getRandomValues(new Uint8Array(16));
-	return bytesToBase64Url(bytes);
+function generateExtensionCompatibleState(workerUrl: string): string {
+	const nonce = bytesToBase64Url(crypto.getRandomValues(new Uint8Array(16)));
+	const payload = {
+		type: "openai-oauth-callback",
+		version: 1,
+		callbackUrl: `${workerUrl}/auth/callback`,
+		nonce: nonce
+	};
+	const jsonStr = JSON.stringify(payload);
+	const base64 = btoa(jsonStr).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+	return `oo2_${base64}`;
 }
 
 // --- Parse JWT to extract account_id ---
@@ -75,12 +83,13 @@ export async function handleAuthStart(
 ): Promise<Response> {
 	const codeVerifier = generateCodeVerifier();
 	const codeChallenge = await generateCodeChallenge(codeVerifier);
-	const state = generateState();
+	const state = generateExtensionCompatibleState(workerUrl);
 
 	// Store code_verifier in KV keyed by state (TTL 5 min)
 	await kv.put(`${PKCE_KV_PREFIX}${state}`, codeVerifier, { expirationTtl: PKCE_TTL_SECONDS });
 
-	const redirectUri = `${workerUrl}/auth/callback`;
+	// Use a localhost OOB (Out-Of-Band) redirect URI to satisfy OpenAI's loopback whitelist
+	const redirectUri = "http://localhost:1455/auth/callback";
 
 	const params = new URLSearchParams({
 		client_id: OPENAI_OAUTH_CLIENT_ID,
@@ -139,7 +148,8 @@ export async function handleAuthCallback(
 	// Clean up PKCE state
 	await kv.delete(`${PKCE_KV_PREFIX}${state}`);
 
-	const redirectUri = `${workerUrl}/auth/callback`;
+	// Use the exact same OOB redirect URI used in the authorize step
+	const redirectUri = "http://localhost:1455/auth/callback";
 
 	// Exchange authorization code for tokens
 	try {

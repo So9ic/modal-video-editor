@@ -19,8 +19,9 @@ font_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Monts
 
 image_builder = (
     modal.Image.debian_slim()
-    .apt_install("ffmpeg", "fonts-freefont-ttf")
-    .pip_install("requests", "pillow", "openai", "fastapi[standard]")
+    .apt_install("ffmpeg", "fonts-freefont-ttf", "curl", "npm")
+    .run_commands("npm install -g n", "n 20", "hash -r", "npm install -g openai-oauth@latest")
+    .pip_install("requests", "pillow", "openai", "fastapi[standard]", "httpx")
 )
 
 if os.path.exists(font_file_path):
@@ -294,17 +295,76 @@ def generate_multi_frame_ai_caption(grid_path: str | list[str], bot_token: str, 
         "image_url": {"url": cdn_url}
     }]
 
-    # Connect to Cloudflare Worker proxy (handles token refresh automatically)
+    # 1. Fetch fresh OAuth token from Cloudflare Worker
     worker_url = os.environ.get("WORKER_URL", "")
     worker_secret = os.environ.get("WORKER_SECRET", "")
 
     if not worker_url or not worker_secret:
         raise RuntimeError("WORKER_URL and WORKER_SECRET must be set in Modal secrets")
 
-    from openai import OpenAI
-    client = OpenAI(base_url=f"{worker_url.rstrip('/')}/v1", api_key=worker_secret)
+    print(f"[Modal AI] Fetching fresh OAuth token from Cloudflare Worker Token Manager...")
+    try:
+        token_req = requests.get(
+            f"{worker_url.rstrip('/')}/api/token",
+            headers={"Authorization": f"Bearer {worker_secret}"},
+            timeout=15
+        )
+        token_req.raise_for_status()
+        token_data = token_req.json()
+    except Exception as e:
+        raise RuntimeError(f"Failed to fetch token from worker: {e} - Response: {getattr(e.response, 'text', '')}")
 
-    print(f"[Modal AI] Sending Vision request via Cloudflare Worker proxy...")
+    access_token = token_data.get("access_token")
+    account_id = token_data.get("account_id", "")
+    
+    if not access_token:
+        raise RuntimeError(f"Worker failed to return a valid access_token. Raw data: {token_data}")
+
+    print(f"[Modal AI] Token acquired. Saving to local auth.json for openai-oauth proxy...")
+
+    # 2. Write auth.json for the local proxy
+    import json
+    auth_dir = os.path.expanduser("~/.codex")
+    os.makedirs(auth_dir, exist_ok=True)
+    auth_file = os.path.join(auth_dir, "auth.json")
+    with open(auth_file, "w") as f:
+        json.dump({"tokens": {"access_token": access_token, "account_id": account_id}}, f)
+
+    # 3. Spawn the local openai-oauth proxy in a subprocess
+    print(f"[Modal AI] Starting local openai-oauth proxy on port 1455...")
+    proxy_proc = subprocess.Popen(
+        ["openai-oauth", "--port", "1455", "--oauth-file", auth_file],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
+    )
+
+    # Wait for the proxy to be ready
+    import time
+    proxy_ready = False
+    for _ in range(30):
+        try:
+            r = requests.get("http://127.0.0.1:1455/v1/models", timeout=1)
+            if r.status_code == 200:
+                proxy_ready = True
+                break
+        except requests.exceptions.RequestException:
+            time.sleep(0.5)
+
+    if not proxy_ready:
+        proxy_proc.terminate()
+        stdout, stderr = proxy_proc.communicate()
+        raise RuntimeError(f"Failed to start local proxy. stdout: {stdout.decode()} stderr: {stderr.decode()}")
+
+    print(f"[Modal AI] Local proxy is ready! Sending request...")
+
+    # 4. Connect to the local proxy (it will translate the request to /responses API)
+    from openai import OpenAI
+    import httpx
+
+    client = OpenAI(
+        base_url="http://127.0.0.1:1455/v1",
+        api_key="dummy-key-not-used-by-local-proxy",
+    )
 
     extra_context_block = ""
     if extra_details and extra_details.strip():
@@ -339,21 +399,25 @@ def generate_multi_frame_ai_caption(grid_path: str | list[str], bot_token: str, 
         "- Plain text only. Do NOT use markdown bold/italic asterisks or hyphens inside the text body."
     )
 
-    res = client.chat.completions.create(
-        model="gpt-5.5",
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    *image_payloads
-                ]
-            }
-        ],
-        timeout=90
-    )
-
-    return res.choices[0].message.content.strip()
+    try:
+        res = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        *image_payloads
+                    ]
+                }
+            ],
+            timeout=120
+        )
+        return res.choices[0].message.content.strip()
+    finally:
+        print(f"[Modal AI] Terminating local proxy...")
+        proxy_proc.terminate()
+        proxy_proc.wait()
 
 # -----------------------------------------------------------------------------
 # 5. ASYNCHRONOUS HEAVY RENDERING & BOT PIPELINE ON MODAL

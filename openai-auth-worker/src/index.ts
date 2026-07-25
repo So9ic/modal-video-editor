@@ -182,6 +182,37 @@ export default {
 			}
 
 			// =============================================
+			// ROUTE: /api/token — Get active access token (for Modal script)
+			// =============================================
+			if (path === "/api/token" && request.method === "GET") {
+				if (!isApiAuthed(request, env) && !isDashboardAuthed(request, env)) {
+					return jsonResponse({ error: "Unauthorized. Provide Bearer WORKER_SECRET." }, 401);
+				}
+
+				let authData = await getTokens(env.AUTH_KV, env.KV_ENCRYPTION_KEY);
+				if (!authData || !authData.tokens?.access_token) {
+					return jsonResponse({ error: "No tokens stored. Seed auth.json or sign in via dashboard." }, 503);
+				}
+
+				// Refresh if needed
+				try {
+					const refreshed = await refreshIfNeeded(authData);
+					if (refreshed !== authData) {
+						await saveTokens(env.AUTH_KV, env.KV_ENCRYPTION_KEY, refreshed);
+						authData = refreshed;
+						console.log("[Worker] Tokens refreshed and saved to KV");
+					}
+				} catch (refreshErr) {
+					console.error("[Worker] Token refresh failed:", refreshErr);
+				}
+
+				return jsonResponse({
+					access_token: authData.tokens.access_token,
+					account_id: authData.tokens.account_id || "",
+				});
+			}
+
+			// =============================================
 			// ROUTE: /auth/start — Begin OAuth PKCE flow
 			// =============================================
 			if (path === "/auth/start") {

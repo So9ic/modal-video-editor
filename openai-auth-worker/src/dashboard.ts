@@ -385,8 +385,18 @@ export function generateDashboard(workerUrl: string, isAuthed: boolean): string 
 		</div>
 
 		<div class="actions">
-			<a href="/auth/start" class="btn btn-primary" id="signin-btn">🔑 Sign in ChatGPT</a>
+			<a href="/auth/start" target="_blank" class="btn btn-primary" id="signin-btn" onclick="showPasteSection()">🔑 Sign in ChatGPT</a>
 			<button class="btn btn-secondary" onclick="toggleSeed()" id="seed-toggle-btn">📋 Seed auth.json</button>
+		</div>
+
+		<div class="seed-section" id="paste-section" style="display: none; margin-top: 0.75rem;">
+			<h3 style="color: var(--accent);">Complete Sign-In</h3>
+			<p>After logging in, you will be redirected to a broken <code>localhost</code> page. <strong>Copy the full URL</strong> from your address bar and paste it below:</p>
+			<input type="text" id="callback-url" placeholder="http://localhost:1455/auth/callback?code=..." style="width: 100%; padding: 0.65rem; background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 0.6rem; color: var(--text-primary); font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; margin-bottom: 0.75rem; outline: none;">
+			<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
+				<button class="btn btn-primary" onclick="submitCallbackUrl()">Submit URL</button>
+				<button class="btn btn-secondary" onclick="document.getElementById('paste-section').style.display = 'none'">Cancel</button>
+			</div>
 		</div>
 
 		<div class="seed-section" id="seed-section" style="display: none;">
@@ -488,6 +498,22 @@ export function generateDashboard(workerUrl: string, isAuthed: boolean): string 
 		function toggleSeed() {
 			const section = document.getElementById('seed-section');
 			section.style.display = section.style.display === 'none' ? 'block' : 'none';
+		}
+
+		function showPasteSection() {
+			document.getElementById('paste-section').style.display = 'block';
+		}
+
+		function submitCallbackUrl() {
+			const url = document.getElementById('callback-url').value.trim();
+			if (!url.includes('code=') || !url.includes('state=')) {
+				showToast('Invalid URL. Make sure it contains ?code=...&state=...');
+				return;
+			}
+			const queryString = url.split('?')[1];
+			if (queryString) {
+				window.location.href = '/auth/callback?' + queryString;
+			}
 		}
 
 		async function seedTokens() {
