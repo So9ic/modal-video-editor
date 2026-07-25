@@ -576,16 +576,23 @@ def process_video_job_async(chat_id: int, job_data: dict):
         grid_path, temp_frame_files = extract_6_frames_grid(output_filepath, final_duration, job_id)
         files_to_clean.extend(temp_frame_files)
 
-        # Step 6: Send Final Video to Telegram User
-        print(f"[{job_id}] Sending final video to Telegram...")
-        with open(output_filepath, "rb") as vf:
-            res_v = requests.post(
-                f"https://api.telegram.org/bot{bot_token}/sendVideo",
-                data={"chat_id": chat_id, "caption": "✅ Your video is ready!"},
-                files={"video": ("final_video.mp4", vf, "video/mp4")},
-                timeout=120
-            ).json()
-            print(f"[{job_id}] Telegram sendVideo response: {res_v.get('ok')}")
+        # Step 6: Send Final Video to Telegram User in background thread
+        def send_video_bg():
+            print(f"[{job_id}] Sending final video to Telegram (background)...")
+            try:
+                with open(output_filepath, "rb") as vf:
+                    res_v = requests.post(
+                        f"https://api.telegram.org/bot{bot_token}/sendVideo",
+                        data={"chat_id": chat_id, "caption": "✅ Your video is ready!"},
+                        files={"video": ("final_video.mp4", vf, "video/mp4")},
+                        timeout=120
+                    ).json()
+                    print(f"[{job_id}] Telegram sendVideo response: {res_v.get('ok')}")
+            except Exception as e:
+                print(f"[{job_id}] Failed to send video: {e}")
+
+        video_thread = threading.Thread(target=send_video_bg, daemon=False)
+        video_thread.start()
 
         video_done_time = time.time()
         render_elapsed = video_done_time - job_start_time
@@ -597,6 +604,12 @@ def process_video_job_async(chat_id: int, job_data: dict):
         try:
             ai_caption = generate_multi_frame_ai_caption(grid_path, bot_token, chat_id, proxy_manager, proxy_thread, extra_details=extra_details)
             ai_elapsed = time.time() - ai_start_time
+            
+            # Ensure video is fully uploaded before we send the caption to guarantee order
+            if video_thread.is_alive():
+                print(f"[{job_id}] Waiting for background video upload to finish before sending caption...")
+                video_thread.join(timeout=120)
+
             total_elapsed = time.time() - job_start_time
 
             caption_msg = (
@@ -640,6 +653,8 @@ def process_video_job_async(chat_id: int, job_data: dict):
     finally:
         if 'proxy_manager' in locals():
             proxy_manager.terminate()
+        if 'video_thread' in locals() and video_thread.is_alive():
+            video_thread.join(timeout=120)
         if storage_thread and storage_thread.is_alive():
             storage_thread.join(timeout=30)
         cleanup_files(files_to_clean)
