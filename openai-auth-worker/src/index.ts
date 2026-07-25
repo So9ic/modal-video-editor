@@ -17,11 +17,13 @@ export interface Env {
 	WORKER_SECRET: string;
 	KV_ENCRYPTION_KEY: string;
 	DASHBOARD_PASSWORD: string;
+	WORKER_URL?: string;
 }
 
 // --- Helpers ---
 
-function getWorkerUrl(request: Request): string {
+function getWorkerUrl(request: Request, env: Env): string {
+	if (env.WORKER_URL) return env.WORKER_URL.replace(/\/$/, "");
 	const url = new URL(request.url);
 	return `${url.protocol}//${url.host}`;
 }
@@ -136,7 +138,7 @@ export default {
 			// =============================================
 			if (path === "/" || path === "") {
 				const isAuthed = isDashboardAuthed(request, env);
-				const workerUrl = getWorkerUrl(request);
+				const workerUrl = getWorkerUrl(request, env);
 				const html = generateDashboard(workerUrl, isAuthed);
 				return new Response(html, {
 					headers: { "Content-Type": "text/html; charset=utf-8" },
@@ -183,7 +185,7 @@ export default {
 			// ROUTE: /auth/start — Begin OAuth PKCE flow
 			// =============================================
 			if (path === "/auth/start") {
-				const workerUrl = getWorkerUrl(request);
+				const workerUrl = getWorkerUrl(request, env);
 				return handleAuthStart(request, env.AUTH_KV, workerUrl);
 			}
 
@@ -191,7 +193,7 @@ export default {
 			// ROUTE: /auth/callback — OAuth callback
 			// =============================================
 			if (path === "/auth/callback") {
-				const workerUrl = getWorkerUrl(request);
+				const workerUrl = getWorkerUrl(request, env);
 				return handleAuthCallback(request, env.AUTH_KV, env.KV_ENCRYPTION_KEY, workerUrl);
 			}
 
