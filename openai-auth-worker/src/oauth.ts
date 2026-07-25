@@ -84,13 +84,14 @@ export async function handleAuthStart(
 
 	const params = new URLSearchParams({
 		client_id: OPENAI_OAUTH_CLIENT_ID,
-		redirect_uri: redirectUri,
 		response_type: "code",
+		redirect_uri: redirectUri,
 		scope: OAUTH_SCOPE,
 		state: state,
 		code_challenge: codeChallenge,
 		code_challenge_method: "S256",
-		prompt: "login",
+		codex_cli_simplified_flow: "true",
+		id_token_add_organizations: "true",
 	});
 
 	const authorizationUrl = `${OPENAI_AUTHORIZE_URL}?${params.toString()}`;
