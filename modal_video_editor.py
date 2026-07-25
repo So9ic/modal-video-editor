@@ -328,6 +328,8 @@ class ProxyManager:
                     if r.status_code == 200:
                         self.ready = True
                         break
+                    else:
+                        time.sleep(0.5)
                 except requests.exceptions.RequestException:
                     time.sleep(0.5)
 
