@@ -118,7 +118,7 @@ def get_media_info(media_path, media_type):
 
     command = [
         'ffprobe', '-v', 'error',
-        '-show_entries', 'stream=codec_name,codec_type,width,height,duration:format=duration',
+        '-show_entries', 'stream=codec_name,codec_type,width,height,duration:stream_tags=rotate:stream_side_data=rotation:format=duration',
         '-of', 'json', media_path
     ]
     try:
@@ -136,6 +136,22 @@ def get_media_info(media_path, media_type):
                 width = s.get('width')
                 height = s.get('height')
                 duration = s.get('duration')
+                
+                # Check for rotation in metadata to swap width/height appropriately
+                rotation = s.get('tags', {}).get('rotate')
+                if not rotation:
+                    for sd in s.get('side_data_list', []):
+                        if 'rotation' in sd:
+                            rotation = sd['rotation']
+                            break
+                if rotation:
+                    try:
+                        rot = abs(int(float(rotation)))
+                        if rot == 90 or rot == 270:
+                            width, height = height, width
+                    except ValueError:
+                        pass
+                        
             elif s.get('codec_type') == 'audio':
                 has_audio = True
                 audio_codec = s.get('codec_name', '').lower()
@@ -168,9 +184,13 @@ def create_caption_image(text, job_id):
     text_bbox = dummy_draw.multiline_textbbox((0, 0), wrapped_text, font=font, align="center", spacing=CAPTION_LINE_SPACING)
     text_height = text_bbox[3] - text_bbox[1]
     rect_height = text_height + (2 * CAPTION_V_PADDING) + 6  # extra buffer for font descenders
-    img = Image.new('RGBA', (COMP_WIDTH, int(rect_height)), (0, 0, 0, 0))
+    rect_height = int(rect_height)
+    if rect_height % 2 != 0:
+        rect_height += 1
+        
+    img = Image.new('RGBA', (COMP_WIDTH, rect_height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    draw.rectangle([(0, 0), (COMP_WIDTH, int(rect_height))], fill=CAPTION_BG_COLOR)
+    draw.rectangle([(0, 0), (COMP_WIDTH, rect_height)], fill=CAPTION_BG_COLOR)
     draw.multiline_text((COMP_WIDTH / 2, int(rect_height) / 2), wrapped_text, font=font, fill=CAPTION_TEXT_COLOR, anchor="mm", align="center", spacing=CAPTION_LINE_SPACING)
     caption_image_path = os.path.join(OUTPUT_PATH, f"caption_{job_id}.png")
     img.save(caption_image_path)
@@ -564,28 +584,36 @@ def process_video_job_async(chat_id: int, job_data: dict):
         output_filepath = os.path.join(OUTPUT_PATH, f"output_{job_id}.mp4")
         files_to_clean.append(output_filepath)
 
-        # Step 3: EXACT Position & Layer Math (BLIND COPY FROM televideditor.py)
+        # Step 3: Dynamic Position & Layer Math (No Fixed Black Background)
         scale_ratio = COMP_WIDTH / media_w
         scaled_media_h = (int(media_h * scale_ratio) // 2) * 2
-        fade_canvas_h = scaled_media_h + 2
-        media_y_pos = (COMP_HEIGHT / 2 - scaled_media_h / 2) + MEDIA_Y_OFFSET
-        caption_y_pos = media_y_pos - caption_height + 1
+        scaled_media_h = max(2, scaled_media_h)  # Edge case: prevent 0 height
+        caption_h_even = int(caption_height)  # already even from create_caption_image
+        total_h = scaled_media_h + caption_h_even
+        comp_size_str = f"{COMP_WIDTH}x{total_h}"
 
-        # Step 4: EXACT FFmpeg Assembly (BLIND COPY FROM televideditor.py)
-        command = ['ffmpeg', '-y', '-threads', '4', '-f', 'lavfi', '-i', f'color=c={BACKGROUND_COLOR}:s={COMP_SIZE_STR}:d={final_duration}']
+        final_duration = max(0.5, final_duration)  # Edge case: prevent 0 or negative duration
+
+        # Step 4: Optimized FFmpeg Assembly
+        command = ['ffmpeg', '-y', '-threads', '4']
         if media_type == 'image':
             command.extend(['-loop', '1', '-t', str(final_duration)])
         command.extend(['-i', media_path, '-i', caption_img_path])
 
-        filter_parts = [f"[1:v]scale={COMP_WIDTH}:-2,setpts=PTS-STARTPTS[scaled_media]"]
+        filter_parts = [f"[0:v]scale={COMP_WIDTH}:{scaled_media_h},setsar=1,setpts=PTS-STARTPTS[scaled_media]"]
         media_layer = "[scaled_media]"
 
         if apply_fade:
             filter_parts.extend([
-                f"color=c=black:s={COMP_WIDTH}x{fade_canvas_h}:d={final_duration},format=rgba,fade=t=out:st=0:d={min(FADE_IN_DURATION, final_duration)}[fade_layer]",
+                f"color=c=black:s={COMP_WIDTH}x{scaled_media_h}:d={final_duration},format=rgba,fade=t=out:st=0:d={min(FADE_IN_DURATION, final_duration)}[fade_layer]",
                 f"[scaled_media][fade_layer]overlay=0:0[media_with_fade]"
             ])
             media_layer = "[media_with_fade]"
+
+        # Pad the media on top to fit the caption
+        filter_parts.append(
+            f"{media_layer}pad={COMP_WIDTH}:{total_h}:0:{caption_h_even}:black[padded_media]"
+        )
 
         font_path = "/root/RobotoCondensed-VariableFont_wght.ttf"
         if not os.path.exists(font_path):
@@ -593,12 +621,11 @@ def process_video_job_async(chat_id: int, job_data: dict):
         if not os.path.exists(font_path):
             font_path = "RobotoCondensed-VariableFont_wght.ttf"
 
-        media_center_y = int((COMP_HEIGHT / 2) + MEDIA_Y_OFFSET)
+        media_center_y = caption_h_even + (scaled_media_h // 2)
         watermark_y = media_center_y + 150
         filter_parts.extend([
-            f"[0:v]{media_layer}overlay=(W-w)/2:{media_y_pos}[bg_with_media]",
-            f"[bg_with_media][2:v]overlay=(W-w)/2:{caption_y_pos}[with_caption]",
-            f"color=c=#808080:s={COMP_SIZE_STR}:d={final_duration}[gray_bg]",
+            f"[padded_media][1:v]overlay=0:0[with_caption]",
+            f"color=c=#808080:s={comp_size_str}:d={final_duration}[gray_bg]",
             f"[gray_bg]drawtext=fontfile='{font_path}':text='knowledgemaxxing':fontcolor=white@0.35:borderw=1:bordercolor=white@0.35:shadowcolor=black@0.35:shadowx=3:shadowy=3:fontsize=36:x=135:y={watermark_y}-(text_h/2)[watermark_layer]",
             f"[with_caption][watermark_layer]blend=all_mode=hardlight:all_opacity=1[final_v]"
         ])
@@ -608,7 +635,7 @@ def process_video_job_async(chat_id: int, job_data: dict):
 
         # Audio stream synchronization: Align audio timestamps with video PTS to guarantee 100% Telegram A/V sync stability
         if media_type == 'video' and has_audio:
-            filter_complex += ";[1:a]asetpts=PTS-STARTPTS[final_a]"
+            filter_complex += ";[0:a]asetpts=PTS-STARTPTS[final_a]"
             map_args.extend(['-map', '[final_a]'])
 
         command.extend([
