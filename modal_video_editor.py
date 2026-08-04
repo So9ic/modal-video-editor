@@ -622,9 +622,7 @@ def process_video_job_async(chat_id: int, job_data: dict):
             filter_parts.extend([
                 f"[0:v]{media_layer}overlay=(W-w)/2:{media_y_pos}[bg_with_media]",
                 f"[bg_with_media][2:v]overlay=(W-w)/2:{caption_y_pos}[with_caption]",
-                f"color=c=#808080:s={COMP_SIZE_STR}:d={final_duration}[gray_bg]",
-                f"[gray_bg]drawtext=fontfile='{font_path}':text='knowledgemaxxing':fontcolor=white@0.35:borderw=1:bordercolor=white@0.35:shadowcolor=black@0.35:shadowx=3:shadowy=3:fontsize=36:x=135:y={watermark_y}-(text_h/2)[watermark_layer]",
-                f"[with_caption][watermark_layer]blend=all_mode=hardlight:all_opacity=1[final_v]"
+                f"[with_caption]drawtext=fontfile='{font_path}':text='knowledgemaxxing':fontcolor=white@0.35:borderw=1:bordercolor=white@0.35:shadowcolor=black@0.35:shadowx=3:shadowy=3:fontsize=36:x=135:y={watermark_y}-(text_h/2)[final_v]"
             ])
 
             filter_complex = ";".join(filter_parts)
@@ -632,8 +630,11 @@ def process_video_job_async(chat_id: int, job_data: dict):
 
             # Padded mode: media is input 1 (input 0 is color canvas)
             if media_type == 'video' and has_audio:
-                filter_complex += ";[1:a]asetpts=PTS-STARTPTS[final_a]"
-                map_args.extend(['-map', '[final_a]'])
+                if audio_codec == 'aac':
+                    map_args.extend(['-map', '1:a'])
+                else:
+                    filter_complex += ";[1:a]asetpts=PTS-STARTPTS[final_a]"
+                    map_args.extend(['-map', '[final_a]'])
 
         else:
             # ---- UNPADDED MODE: Dynamic tight-wrap (no fixed background) ----
@@ -665,9 +666,7 @@ def process_video_job_async(chat_id: int, job_data: dict):
             watermark_y = media_center_y + 150
             filter_parts.extend([
                 f"[padded_media][1:v]overlay=0:0[with_caption]",
-                f"color=c=#808080:s={comp_size_str}:d={final_duration}[gray_bg]",
-                f"[gray_bg]drawtext=fontfile='{font_path}':text='knowledgemaxxing':fontcolor=white@0.35:borderw=1:bordercolor=white@0.35:shadowcolor=black@0.35:shadowx=3:shadowy=3:fontsize=36:x=135:y={watermark_y}-(text_h/2)[watermark_layer]",
-                f"[with_caption][watermark_layer]blend=all_mode=hardlight:all_opacity=1[final_v]"
+                f"[with_caption]drawtext=fontfile='{font_path}':text='knowledgemaxxing':fontcolor=white@0.35:borderw=1:bordercolor=white@0.35:shadowcolor=black@0.35:shadowx=3:shadowy=3:fontsize=36:x=135:y={watermark_y}-(text_h/2)[final_v]"
             ])
 
             filter_complex = ";".join(filter_parts)
@@ -675,8 +674,17 @@ def process_video_job_async(chat_id: int, job_data: dict):
 
             # Unpadded mode: media is input 0 (no color canvas)
             if media_type == 'video' and has_audio:
-                filter_complex += ";[0:a]asetpts=PTS-STARTPTS[final_a]"
-                map_args.extend(['-map', '[final_a]'])
+                if audio_codec == 'aac':
+                    map_args.extend(['-map', '0:a'])
+                else:
+                    filter_complex += ";[0:a]asetpts=PTS-STARTPTS[final_a]"
+                    map_args.extend(['-map', '[final_a]'])
+
+        # Audio codec: copy AAC directly to skip re-encoding, re-encode other formats
+        if media_type == 'video' and has_audio and audio_codec == 'aac':
+            audio_codec_args = ['-c:a', 'copy']
+        else:
+            audio_codec_args = ['-c:a', 'aac', '-b:a', '192k']
 
         command.extend([
             '-filter_complex', filter_complex,
@@ -687,8 +695,7 @@ def process_video_job_async(chat_id: int, job_data: dict):
             '-preset', 'ultrafast',
             '-threads', '4',
             '-slices', '4',
-            '-c:a', 'aac',
-            '-b:a', '192k',
+            *audio_codec_args,
             '-r', str(FPS),
             '-pix_fmt', 'yuv420p',
             '-movflags', '+faststart',
