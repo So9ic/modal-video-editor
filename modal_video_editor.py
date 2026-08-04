@@ -1,15 +1,11 @@
 import os
-import sys
 import json
 import time
-import base64
 import textwrap
 import subprocess
 import requests
 import threading
 from PIL import Image, ImageDraw, ImageFont
-from fastapi import FastAPI, Request
-from fastapi.responses import Response, JSONResponse
 import modal
 
 # -----------------------------------------------------------------------------
@@ -407,7 +403,6 @@ def generate_multi_frame_ai_caption(grid_path: str | list[str], bot_token: str, 
 
     # 4. Connect to the local proxy (it will translate the request to /responses API)
     from openai import OpenAI
-    import httpx
 
     client = OpenAI(
         base_url=f"http://127.0.0.1:{proxy_manager.port}/v1",
@@ -471,6 +466,7 @@ def process_video_job_async(chat_id: int, job_data: dict):
     job_id = job_data["job_id"]
     caption_text = job_data["caption_text"]
     apply_fade = job_data.get("apply_fade", True)
+    apply_padding = job_data.get("apply_padding", False)
     media_type = job_data.get("media_type", "video")
     job_start_time = job_data.get("start_time", time.time())
 
@@ -488,6 +484,8 @@ def process_video_job_async(chat_id: int, job_data: dict):
     proxy_thread.start()
 
     try:
+        ensure_directories()
+
         # Step 1: Download Media from Telegram
         print(f"[{job_id}] Downloading media file...")
         media_path = download_telegram_file(job_data["file_id"], job_id, bot_token, media_type)
@@ -584,36 +582,12 @@ def process_video_job_async(chat_id: int, job_data: dict):
         output_filepath = os.path.join(OUTPUT_PATH, f"output_{job_id}.mp4")
         files_to_clean.append(output_filepath)
 
-        # Step 3: Dynamic Position & Layer Math (No Fixed Black Background)
+        # Step 3 & 4: Position, Layer Math & FFmpeg Assembly
         scale_ratio = COMP_WIDTH / media_w
         scaled_media_h = (int(media_h * scale_ratio) // 2) * 2
         scaled_media_h = max(2, scaled_media_h)  # Edge case: prevent 0 height
         caption_h_even = int(caption_height)  # already even from create_caption_image
-        total_h = scaled_media_h + caption_h_even
-        comp_size_str = f"{COMP_WIDTH}x{total_h}"
-
         final_duration = max(0.5, final_duration)  # Edge case: prevent 0 or negative duration
-
-        # Step 4: Optimized FFmpeg Assembly
-        command = ['ffmpeg', '-y', '-threads', '4']
-        if media_type == 'image':
-            command.extend(['-loop', '1', '-t', str(final_duration)])
-        command.extend(['-i', media_path, '-i', caption_img_path])
-
-        filter_parts = [f"[0:v]scale={COMP_WIDTH}:{scaled_media_h},setsar=1,setpts=PTS-STARTPTS[scaled_media]"]
-        media_layer = "[scaled_media]"
-
-        if apply_fade:
-            filter_parts.extend([
-                f"color=c=black:s={COMP_WIDTH}x{scaled_media_h}:d={final_duration},format=rgba,fade=t=out:st=0:d={min(FADE_IN_DURATION, final_duration)}[fade_layer]",
-                f"[scaled_media][fade_layer]overlay=0:0[media_with_fade]"
-            ])
-            media_layer = "[media_with_fade]"
-
-        # Pad the media on top to fit the caption
-        filter_parts.append(
-            f"{media_layer}pad={COMP_WIDTH}:{total_h}:0:{caption_h_even}:black[padded_media]"
-        )
 
         font_path = "/root/RobotoCondensed-VariableFont_wght.ttf"
         if not os.path.exists(font_path):
@@ -621,22 +595,88 @@ def process_video_job_async(chat_id: int, job_data: dict):
         if not os.path.exists(font_path):
             font_path = "RobotoCondensed-VariableFont_wght.ttf"
 
-        media_center_y = caption_h_even + (scaled_media_h // 2)
-        watermark_y = media_center_y + 150
-        filter_parts.extend([
-            f"[padded_media][1:v]overlay=0:0[with_caption]",
-            f"color=c=#808080:s={comp_size_str}:d={final_duration}[gray_bg]",
-            f"[gray_bg]drawtext=fontfile='{font_path}':text='knowledgemaxxing':fontcolor=white@0.35:borderw=1:bordercolor=white@0.35:shadowcolor=black@0.35:shadowx=3:shadowy=3:fontsize=36:x=135:y={watermark_y}-(text_h/2)[watermark_layer]",
-            f"[with_caption][watermark_layer]blend=all_mode=hardlight:all_opacity=1[final_v]"
-        ])
+        if apply_padding:
+            # ---- PADDED MODE: Full 9:16 black background canvas ----
+            # Input 0 = color background, Input 1 = media, Input 2 = caption
+            fade_canvas_h = scaled_media_h + 2
+            media_y_pos = (COMP_HEIGHT / 2 - scaled_media_h / 2) + MEDIA_Y_OFFSET
+            caption_y_pos = max(0, media_y_pos - caption_height + 1)
 
-        filter_complex = ";".join(filter_parts)
-        map_args = ['-map', '[final_v]']
+            command = ['ffmpeg', '-y', '-threads', '4', '-f', 'lavfi', '-i', f'color=c={BACKGROUND_COLOR}:s={COMP_SIZE_STR}:d={final_duration}']
+            if media_type == 'image':
+                command.extend(['-loop', '1', '-t', str(final_duration)])
+            command.extend(['-i', media_path, '-i', caption_img_path])
 
-        # Audio stream synchronization: Align audio timestamps with video PTS to guarantee 100% Telegram A/V sync stability
-        if media_type == 'video' and has_audio:
-            filter_complex += ";[0:a]asetpts=PTS-STARTPTS[final_a]"
-            map_args.extend(['-map', '[final_a]'])
+            filter_parts = [f"[1:v]scale={COMP_WIDTH}:-2,setsar=1,setpts=PTS-STARTPTS[scaled_media]"]
+            media_layer = "[scaled_media]"
+
+            if apply_fade:
+                filter_parts.extend([
+                    f"color=c=black:s={COMP_WIDTH}x{fade_canvas_h}:d={final_duration},format=rgba,fade=t=out:st=0:d={min(FADE_IN_DURATION, final_duration)}[fade_layer]",
+                    f"[scaled_media][fade_layer]overlay=0:0[media_with_fade]"
+                ])
+                media_layer = "[media_with_fade]"
+
+            media_center_y = int((COMP_HEIGHT / 2) + MEDIA_Y_OFFSET)
+            watermark_y = media_center_y + 150
+            filter_parts.extend([
+                f"[0:v]{media_layer}overlay=(W-w)/2:{media_y_pos}[bg_with_media]",
+                f"[bg_with_media][2:v]overlay=(W-w)/2:{caption_y_pos}[with_caption]",
+                f"color=c=#808080:s={COMP_SIZE_STR}:d={final_duration}[gray_bg]",
+                f"[gray_bg]drawtext=fontfile='{font_path}':text='knowledgemaxxing':fontcolor=white@0.35:borderw=1:bordercolor=white@0.35:shadowcolor=black@0.35:shadowx=3:shadowy=3:fontsize=36:x=135:y={watermark_y}-(text_h/2)[watermark_layer]",
+                f"[with_caption][watermark_layer]blend=all_mode=hardlight:all_opacity=1[final_v]"
+            ])
+
+            filter_complex = ";".join(filter_parts)
+            map_args = ['-map', '[final_v]']
+
+            # Padded mode: media is input 1 (input 0 is color canvas)
+            if media_type == 'video' and has_audio:
+                filter_complex += ";[1:a]asetpts=PTS-STARTPTS[final_a]"
+                map_args.extend(['-map', '[final_a]'])
+
+        else:
+            # ---- UNPADDED MODE: Dynamic tight-wrap (no fixed background) ----
+            # Input 0 = media, Input 1 = caption
+            total_h = scaled_media_h + caption_h_even
+            comp_size_str = f"{COMP_WIDTH}x{total_h}"
+
+            command = ['ffmpeg', '-y', '-threads', '4']
+            if media_type == 'image':
+                command.extend(['-loop', '1', '-t', str(final_duration)])
+            command.extend(['-i', media_path, '-i', caption_img_path])
+
+            filter_parts = [f"[0:v]scale={COMP_WIDTH}:{scaled_media_h},setsar=1,setpts=PTS-STARTPTS[scaled_media]"]
+            media_layer = "[scaled_media]"
+
+            if apply_fade:
+                filter_parts.extend([
+                    f"color=c=black:s={COMP_WIDTH}x{scaled_media_h}:d={final_duration},format=rgba,fade=t=out:st=0:d={min(FADE_IN_DURATION, final_duration)}[fade_layer]",
+                    f"[scaled_media][fade_layer]overlay=0:0[media_with_fade]"
+                ])
+                media_layer = "[media_with_fade]"
+
+            # Pad the media on top to fit the caption
+            filter_parts.append(
+                f"{media_layer}pad={COMP_WIDTH}:{total_h}:0:{caption_h_even}:black[padded_media]"
+            )
+
+            media_center_y = caption_h_even + (scaled_media_h // 2)
+            watermark_y = media_center_y + 150
+            filter_parts.extend([
+                f"[padded_media][1:v]overlay=0:0[with_caption]",
+                f"color=c=#808080:s={comp_size_str}:d={final_duration}[gray_bg]",
+                f"[gray_bg]drawtext=fontfile='{font_path}':text='knowledgemaxxing':fontcolor=white@0.35:borderw=1:bordercolor=white@0.35:shadowcolor=black@0.35:shadowx=3:shadowy=3:fontsize=36:x=135:y={watermark_y}-(text_h/2)[watermark_layer]",
+                f"[with_caption][watermark_layer]blend=all_mode=hardlight:all_opacity=1[final_v]"
+            ])
+
+            filter_complex = ";".join(filter_parts)
+            map_args = ['-map', '[final_v]']
+
+            # Unpadded mode: media is input 0 (no color canvas)
+            if media_type == 'video' and has_audio:
+                filter_complex += ";[0:a]asetpts=PTS-STARTPTS[final_a]"
+                map_args.extend(['-map', '[final_a]'])
 
         command.extend([
             '-filter_complex', filter_complex,
@@ -889,7 +929,7 @@ def telegram_webhook(payload: dict):
         cb_data = callback_query.get("data")
         if cb_data in ["fade_yes", "fade_no"]:
             user_state["apply_fade"] = (cb_data == "fade_yes")
-            user_state["state"] = "awaiting_extra_details"
+            user_state["state"] = "awaiting_padding_choice"
 
             # Edit the fade question message to show user's choice
             cb_msg_id = callback_query.get("message", {}).get("message_id")
@@ -901,6 +941,49 @@ def telegram_webhook(payload: dict):
                         "chat_id": chat_id,
                         "message_id": cb_msg_id,
                         "text": f"✅ Apply fade: *{fade_text}*",
+                        "parse_mode": "Markdown"
+                    }
+                )
+
+            # Ask about 9:16 padding
+            inline_kb = {
+                "inline_keyboard": [
+                    [
+                        {"text": "Yes", "callback_data": "padding_yes"},
+                        {"text": "No", "callback_data": "padding_no"}
+                    ]
+                ]
+            }
+            res = requests.post(
+                f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                json={
+                    "chat_id": chat_id,
+                    "text": "Do you need padding?",
+                    "reply_markup": inline_kb
+                }
+            ).json()
+            track_msg(res)
+            user_state["msg_ids_to_delete"] = msg_ids_to_delete
+            user_states[chat_key] = user_state
+            return {"status": "ok"}
+
+    # Handle Padding Option Callback
+    if user_state.get("state") == "awaiting_padding_choice" and callback_query:
+        cb_data = callback_query.get("data")
+        if cb_data in ["padding_yes", "padding_no"]:
+            user_state["apply_padding"] = (cb_data == "padding_yes")
+            user_state["state"] = "awaiting_extra_details"
+
+            # Edit the padding question message to show user's choice
+            cb_msg_id = callback_query.get("message", {}).get("message_id")
+            padding_text = "Yes" if cb_data == "padding_yes" else "No"
+            if cb_msg_id:
+                requests.post(
+                    f"https://api.telegram.org/bot{bot_token}/editMessageText",
+                    json={
+                        "chat_id": chat_id,
+                        "message_id": cb_msg_id,
+                        "text": f"✅ Apply padding: *{padding_text}*",
                         "parse_mode": "Markdown"
                     }
                 )
