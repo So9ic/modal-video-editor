@@ -622,7 +622,9 @@ def process_video_job_async(chat_id: int, job_data: dict):
             filter_parts.extend([
                 f"[0:v]{media_layer}overlay=(W-w)/2:{media_y_pos}[bg_with_media]",
                 f"[bg_with_media][2:v]overlay=(W-w)/2:{caption_y_pos}[with_caption]",
-                f"[with_caption]drawtext=fontfile='{font_path}':text='knowledgemaxxing':fontcolor=white@0.22:borderw=1:bordercolor=white@0.12:shadowcolor=black@0.35:shadowx=2:shadowy=2:fontsize=36:x=135:y={watermark_y}-(text_h/2)[final_v]"
+                f"color=c=#808080:s={COMP_SIZE_STR}:d={final_duration}[gray_bg]",
+                f"[gray_bg]drawtext=fontfile='{font_path}':text='knowledgemaxxing':fontcolor=white@0.35:borderw=1:bordercolor=white@0.35:shadowcolor=black@0.35:shadowx=3:shadowy=3:fontsize=36:x=135:y={watermark_y}-(text_h/2)[watermark_layer]",
+                f"[with_caption][watermark_layer]blend=all_mode=hardlight:all_opacity=1[final_v]"
             ])
 
             filter_complex = ";".join(filter_parts)
@@ -666,7 +668,9 @@ def process_video_job_async(chat_id: int, job_data: dict):
             watermark_y = media_center_y + 150
             filter_parts.extend([
                 f"[padded_media][1:v]overlay=0:0[with_caption]",
-                f"[with_caption]drawtext=fontfile='{font_path}':text='knowledgemaxxing':fontcolor=white@0.22:borderw=1:bordercolor=white@0.12:shadowcolor=black@0.35:shadowx=2:shadowy=2:fontsize=36:x=135:y={watermark_y}-(text_h/2)[final_v]"
+                f"color=c=#808080:s={comp_size_str}:d={final_duration}[gray_bg]",
+                f"[gray_bg]drawtext=fontfile='{font_path}':text='knowledgemaxxing':fontcolor=white@0.35:borderw=1:bordercolor=white@0.35:shadowcolor=black@0.35:shadowx=3:shadowy=3:fontsize=36:x=135:y={watermark_y}-(text_h/2)[watermark_layer]",
+                f"[with_caption][watermark_layer]blend=all_mode=hardlight:all_opacity=1[final_v]"
             ])
 
             filter_complex = ";".join(filter_parts)
