@@ -299,6 +299,10 @@ export async function proxyToOpenAI(
 	const accept = request.headers.get("Accept");
 	if (accept) proxyHeaders.set("Accept", accept);
 
+	// Forward User-Agent to avoid WAF blocks
+	const userAgent = request.headers.get("User-Agent") || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+	proxyHeaders.set("User-Agent", userAgent);
+
 	const body = await request.text();
 
 	console.log(`[Proxy] Forwarding ${request.method} to ${targetUrl}`);

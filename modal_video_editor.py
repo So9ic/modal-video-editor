@@ -401,6 +401,22 @@ def generate_multi_frame_ai_caption(grid_path: str | list[str], bot_token: str, 
 
     print(f"[Modal AI] Local proxy is ready! Sending request...")
 
+    # Fetch the dynamically selected model from the Cloudflare worker
+    selected_model = "gpt-4o"
+    try:
+        import requests
+        model_req = requests.get(
+            f"{proxy_manager.worker_url.rstrip('/')}/api/model",
+            headers={"Authorization": f"Bearer {proxy_manager.worker_secret}"},
+            timeout=10
+        )
+        if model_req.status_code == 200:
+            selected_model = model_req.json().get("model", "gpt-4o")
+    except Exception as e:
+        print(f"[Modal AI] Failed to fetch selected model, defaulting to {selected_model}: {e}")
+
+    print(f"[Modal AI] Using model: {selected_model}")
+
     # 4. Connect to the local proxy (it will translate the request to /responses API)
     from openai import OpenAI
 
@@ -443,7 +459,7 @@ def generate_multi_frame_ai_caption(grid_path: str | list[str], bot_token: str, 
     )
 
     res = client.chat.completions.create(
-        model="gpt-5.5",
+        model=selected_model,
         messages=[
             {
                 "role": "user",

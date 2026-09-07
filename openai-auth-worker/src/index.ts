@@ -85,29 +85,72 @@ export default {
 			// ROUTE: /v1/* — OpenAI-compatible API proxy
 			// =============================================
 			if (path.startsWith("/v1/")) {
-				// Authenticate with WORKER_SECRET
+				// Authenticate with WORKER_SECRET (or Dashboard Password for /v1/models)
 				if (!isApiAuthed(request, env)) {
-					return jsonResponse({ error: "Unauthorized. Provide Bearer WORKER_SECRET." }, 401);
+					const isModelsEndpoint = path === "/v1/models" && request.method === "GET";
+					if (!(isModelsEndpoint && isDashboardAuthed(request, env))) {
+						return jsonResponse({ error: "Unauthorized. Provide Bearer WORKER_SECRET." }, 401);
+					}
 				}
 
-				// Handle /v1/models endpoint directly
+				// Handle /v1/models endpoint by querying OpenAI directly
 				if (path === "/v1/models" && request.method === "GET") {
-					return jsonResponse({
-						object: "list",
-						data: [
-							{ id: "gpt-4o", object: "model", owned_by: "openai-oauth-proxy" },
-							{ id: "gpt-4o-mini", object: "model", owned_by: "openai-oauth-proxy" },
-							{ id: "gpt-5.5", object: "model", owned_by: "openai-oauth-proxy" },
-							{ id: "o3", object: "model", owned_by: "openai-oauth-proxy" },
-							{ id: "o4-mini", object: "model", owned_by: "openai-oauth-proxy" },
-						],
-					});
+					try {
+						const authData = await getTokens(env.AUTH_KV, env.KV_ENCRYPTION_KEY);
+						if (!authData || !authData.tokens?.access_token) {
+							throw new Error("No tokens");
+						}
+
+						// Use proxyToOpenAI to mimic exactly what chat/completions does
+						const modelsProxyRes = await proxyToOpenAI(
+							request,
+							authData.tokens.access_token,
+							authData.tokens.account_id || "",
+							"/models?client_version=0.144.1"
+						);
+
+						if (!modelsProxyRes.ok) throw new Error(`Fetch failed: ${modelsProxyRes.status}`);
+						
+						const bodyText = await modelsProxyRes.text();
+						const data = JSON.parse(bodyText) as any;
+						const mappedModels = (data.models || []).map((m: any) => ({
+							id: m.slug,
+							object: "model",
+							owned_by: "openai"
+						}));
+
+						return jsonResponse({ object: "list", data: mappedModels });
+					} catch (e) {
+						// Fallback to static list on Cloudflare 403 or parse error
+						return jsonResponse({
+							object: "list",
+							error_message: e instanceof Error ? e.message : String(e),
+							data: [
+								{ id: "gpt-4o", object: "model", owned_by: "openai-oauth-proxy" },
+								{ id: "gpt-4o-mini", object: "model", owned_by: "openai-oauth-proxy" },
+								{ id: "o1-mini", object: "model", owned_by: "openai-oauth-proxy" },
+								{ id: "o3-mini", object: "model", owned_by: "openai-oauth-proxy" },
+								{ id: "gpt-reserve", object: "model", owned_by: "openai-oauth-proxy" },
+								{ id: "gpt-5.6-terra", object: "model", owned_by: "openai-oauth-proxy" },
+								{ id: "gpt-5.6-luna", object: "model", owned_by: "openai-oauth-proxy" },
+								{ id: "gpt-5.5", object: "model", owned_by: "openai-oauth-proxy" },
+								{ id: "gpt-5.4-mini", object: "model", owned_by: "openai-oauth-proxy" },
+								{ id: "codex-auto-review", object: "model", owned_by: "openai-oauth-proxy" }
+							],
+						});
+					}
 				}
 
 				// Get tokens from KV
 				let authData = await getTokens(env.AUTH_KV, env.KV_ENCRYPTION_KEY);
 				if (!authData || !authData.tokens?.access_token) {
 					return jsonResponse({ error: "No tokens stored. Seed auth.json or sign in via dashboard." }, 503);
+				}
+
+				// Temporary debug endpoint to grab token for curling
+				if (path === "/v1/dump-token" && request.method === "GET") {
+					let authData = await getTokens(env.AUTH_KV, env.KV_ENCRYPTION_KEY);
+					return jsonResponse({ access_token: authData?.tokens?.access_token });
 				}
 
 				// Refresh if needed
@@ -210,6 +253,31 @@ export default {
 					access_token: authData.tokens.access_token,
 					account_id: authData.tokens.account_id || "",
 				});
+			}
+
+			// =============================================
+			// ROUTE: /api/model — Get/Set Selected Model
+			// =============================================
+			if (path === "/api/model") {
+				if (!isApiAuthed(request, env) && !isDashboardAuthed(request, env)) {
+					return jsonResponse({ error: "Unauthorized." }, 401);
+				}
+
+				if (request.method === "GET") {
+					const model = await env.AUTH_KV.get("SELECTED_MODEL") || "gpt-4o";
+					return jsonResponse({ model });
+				} else if (request.method === "POST") {
+					try {
+						const body = await request.json() as { model: string };
+						if (body.model) {
+							await env.AUTH_KV.put("SELECTED_MODEL", body.model);
+							return jsonResponse({ ok: true, message: "Model updated successfully" });
+						}
+						return jsonResponse({ error: "Missing model in body" }, 400);
+					} catch (e) {
+						return jsonResponse({ error: `Invalid JSON body: ${e}` }, 400);
+					}
+				}
 			}
 
 			// =============================================

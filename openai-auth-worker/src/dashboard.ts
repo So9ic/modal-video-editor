@@ -384,6 +384,18 @@ export function generateDashboard(workerUrl: string, isAuthed: boolean): string 
 			</div>
 		</div>
 
+		<div class="status-card" style="margin-bottom: 0.25rem;">
+			<div class="status-header" style="margin-bottom: 0.5rem;">
+				<span class="status-label" style="color: var(--accent);">🤖 Active Model</span>
+			</div>
+			<div style="display: flex; gap: 0.5rem;">
+				<select id="model-select" style="flex: 1; padding: 0.65rem; background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 0.6rem; color: var(--text-primary); font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; outline: none; transition: border-color 0.2s;">
+					<option value="">Loading live models from OpenAI...</option>
+				</select>
+				<button class="btn btn-primary" style="width: auto; padding: 0.65rem 1rem;" onclick="saveModel()" id="save-model-btn">Save</button>
+			</div>
+		</div>
+
 		<div class="actions">
 			<a href="/auth/start" target="_blank" class="btn btn-primary" id="signin-btn" onclick="showPasteSection()">🔑 Sign in ChatGPT</a>
 			<button class="btn btn-secondary" onclick="toggleSeed()" id="seed-toggle-btn">📋 Seed auth.json</button>
@@ -427,6 +439,86 @@ export function generateDashboard(workerUrl: string, isAuthed: boolean): string 
 				renderStatus(data);
 			} catch (e) {
 				renderError(e.message);
+			}
+		}
+
+		async function fetchModel() {
+			try {
+				const select = document.getElementById('model-select');
+
+				// First, attempt to fetch the dynamic models directly from the OpenAI proxy
+				try {
+					const modelsRes = await fetch('/v1/models', {
+						headers: { 'X-Dashboard-Password': PASSWORD }
+					});
+					if (modelsRes.ok) {
+						const data = await modelsRes.json();
+						if (data.data && Array.isArray(data.data)) {
+							select.innerHTML = '';
+							data.data.forEach(m => {
+								const opt = document.createElement('option');
+								opt.value = m.id;
+								opt.innerText = m.id;
+								select.appendChild(opt);
+							});
+						}
+					} else {
+						select.innerHTML = '<option value="gpt-4o">gpt-4o (Fallback - Fetch Failed)</option>';
+					}
+				} catch (e) {
+					select.innerHTML = '<option value="gpt-4o">gpt-4o (Fallback - Fetch Error)</option>';
+				}
+
+				// Then fetch the user's saved selection from KV
+				const res = await fetch('/api/model', {
+					headers: { 'X-Dashboard-Password': PASSWORD }
+				});
+				if (res.ok) {
+					const data = await res.json();
+					if (data.model) {
+						// Add it if it's somehow not in the dynamic list
+						let exists = false;
+						for (let i = 0; i < select.options.length; i++) {
+							if (select.options[i].value === data.model) exists = true;
+						}
+						if (!exists) {
+							const opt = document.createElement('option');
+							opt.value = data.model;
+							opt.innerText = data.model + " (Saved)";
+							select.appendChild(opt);
+						}
+						select.value = data.model;
+					}
+				}
+			} catch (e) {
+				console.error('Failed to fetch model:', e);
+			}
+		}
+
+		async function saveModel() {
+			const model = document.getElementById('model-select').value;
+			const btn = document.getElementById('save-model-btn');
+			btn.disabled = true;
+			btn.innerText = 'Saving...';
+			try {
+				const res = await fetch('/api/model', {
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json',
+						'X-Dashboard-Password': PASSWORD
+					},
+					body: JSON.stringify({ model })
+				});
+				if (res.ok) {
+					showToast('Model saved successfully');
+				} else {
+					showToast('Failed to save model');
+				}
+			} catch (e) {
+				showToast('Network error');
+			} finally {
+				btn.disabled = false;
+				btn.innerText = 'Save';
 			}
 		}
 
@@ -594,6 +686,7 @@ export function generateDashboard(workerUrl: string, isAuthed: boolean): string 
 
 		// Initial fetch + auto-refresh
 		fetchStatus();
+		fetchModel();
 		autoRefreshInterval = setInterval(fetchStatus, 30000);
 	</script>
 </body>
